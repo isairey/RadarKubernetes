@@ -1,0 +1,486 @@
+name: Release Desktop
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    name: macOS (universal)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.26'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: package-lock.json
+
+      - name: Install Wails CLI
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
+
+      - name: Build frontend
+        run: make frontend embed
+
+      - name: Create dummy kubeconfig for Wails binding generation
+        run: |
+          mkdir -p ~/.kube
+          echo 'apiVersion: v1
+          kind: Config
+          clusters:
+          - cluster:
+              server: https://localhost:6443
+            name: dummy
+          contexts:
+          - context:
+              cluster: dummy
+              user: dummy
+            name: dummy
+          current-context: dummy
+          users:
+          - name: dummy
+            user:
+              token: dummy' > ~/.kube/config
+
+      - name: Import Apple certificate
+        uses: Apple-Actions/import-codesign-certs@v7
+        with:
+          p12-file-base64: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+
+      - name: Build macOS .app (universal)
+        run: cd cmd/desktop && wails build -platform darwin/universal -ldflags "-X main.version=${GITHUB_REF_NAME#v}"
+
+      - name: Update bundle identifier
+        run: plutil -replace CFBundleIdentifier -string "io.skyhook.radar" build/bin/radar-desktop.app/Contents/Info.plist
+
+      - name: Codesign with Developer ID
+        run: |
+          APP="build/bin/radar-desktop.app"
+          codesign --timestamp --options=runtime \
+            --entitlements build/darwin/entitlements.plist \
+            --sign "Developer ID Application: KoalaOps, Inc. (${{ secrets.APPLE_TEAM_ID }})" \
+            --force --deep "$APP"
+          codesign --verify --verbose "$APP"
+
+      - name: Create archive
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          cd build/bin
+          mv radar-desktop.app Radar.app
+          zip -r "../../radar-desktop_${VERSION}_darwin_universal.zip" Radar.app
+          cd ../..
+
+      - name: Notarize
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          xcrun notarytool submit "radar-desktop_${VERSION}_darwin_universal.zip" \
+            --apple-id "${{ secrets.APPLE_ID }}" \
+            --team-id "${{ secrets.APPLE_TEAM_ID }}" \
+            --password "${{ secrets.APPLE_APP_PASSWORD }}" \
+            --wait
+
+      - name: Staple notarization ticket
+        run: |
+          cd build/bin
+          xcrun stapler staple Radar.app
+          cd ../..
+
+      - name: Re-create archive with stapled ticket
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          cd build/bin
+          zip -r "../../radar-desktop_${VERSION}_darwin_universal.zip" Radar.app
+          cd ../..
+
+      - name: Generate checksum
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          shasum -a 256 "radar-desktop_${VERSION}_darwin_universal.zip" >> checksums-darwin.txt
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-macos
+          path: |
+            radar-desktop_*.zip
+            checksums-darwin.txt
+          retention-days: 1
+
+      - name: Build summary
+        if: always()
+        run: |
+          {
+            echo "## macOS Desktop Build"
+            echo ""
+            if ls radar-desktop_*.zip 1>/dev/null 2>&1; then
+              echo "**Status:** Success"
+              ls -lh radar-desktop_*.zip | awk '{print "- `" $NF "` (" $5 ")"}'
+            else
+              echo "**Status:** Failed"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  build-windows:
+    name: Windows (amd64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.26'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: package-lock.json
+
+      - name: Install Wails CLI
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
+
+      - name: Build frontend
+        run: make frontend embed
+
+      - name: Create dummy kubeconfig for Wails binding generation
+        shell: bash
+        run: |
+          mkdir -p ~/.kube
+          echo 'apiVersion: v1
+          kind: Config
+          clusters:
+          - cluster:
+              server: https://localhost:6443
+            name: dummy
+          contexts:
+          - context:
+              cluster: dummy
+              user: dummy
+            name: dummy
+          current-context: dummy
+          users:
+          - name: dummy
+            user:
+              token: dummy' > ~/.kube/config
+
+      - name: Build Windows exe
+        run: cd cmd/desktop && wails build -platform windows/amd64 -ldflags "-X main.version=${GITHUB_REF_NAME#v}"
+
+      - name: Create archive
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          cd build/bin
+          7z a "../../radar-desktop_${VERSION}_windows_amd64.zip" Radar.exe
+          cd ../..
+
+      - name: Generate checksum
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          sha256sum "radar-desktop_${VERSION}_windows_amd64.zip" >> checksums-windows.txt
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-windows
+          path: |
+            radar-desktop_*.zip
+            checksums-windows.txt
+          retention-days: 1
+
+      - name: Build summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Windows Desktop Build"
+            echo ""
+            if ls radar-desktop_*.zip 1>/dev/null 2>&1; then
+              echo "**Status:** Success"
+              ls -lh radar-desktop_*.zip | awk '{print "- `" $NF "` (" $5 ")"}'
+            else
+              echo "**Status:** Failed"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  build-linux:
+    name: Linux (amd64)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.26'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: package-lock.json
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
+
+      - name: Install Wails CLI
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
+
+      - name: Install nfpm
+        run: go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
+
+      - name: Build frontend
+        run: make frontend embed
+
+      - name: Create dummy kubeconfig for Wails binding generation
+        run: |
+          mkdir -p ~/.kube
+          echo 'apiVersion: v1
+          kind: Config
+          clusters:
+          - cluster:
+              server: https://localhost:6443
+            name: dummy
+          contexts:
+          - context:
+              cluster: dummy
+              user: dummy
+            name: dummy
+          current-context: dummy
+          users:
+          - name: dummy
+            user:
+              token: dummy' > ~/.kube/config
+
+      - name: Build Linux binary
+        run: |
+          cd cmd/desktop && wails build -platform linux/amd64 -tags webkit2_41 -ldflags "-X main.version=${GITHUB_REF_NAME#v}"
+          mv ../../build/bin/Radar ../../build/bin/radar-desktop
+
+      - name: Create archive
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          cd build/bin
+          tar czf "../../radar-desktop_${VERSION}_linux_amd64.tar.gz" radar-desktop
+          cd ../..
+
+      - name: Build .deb and .rpm packages
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          export VERSION="${TAG#v}"
+          nfpm package --config deploy/linux/nfpm.yaml --packager deb --target "radar-desktop_${TAG}_linux_amd64.deb"
+          nfpm package --config deploy/linux/nfpm.yaml --packager rpm --target "radar-desktop_${TAG}_linux_amd64.rpm"
+
+      - name: Generate checksums
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          sha256sum "radar-desktop_${VERSION}_linux_amd64.tar.gz" >> checksums-linux.txt
+          sha256sum "radar-desktop_${VERSION}_linux_amd64.deb" >> checksums-linux.txt
+          sha256sum "radar-desktop_${VERSION}_linux_amd64.rpm" >> checksums-linux.txt
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-linux
+          path: |
+            radar-desktop_*.tar.gz
+            radar-desktop_*.deb
+            radar-desktop_*.rpm
+            checksums-linux.txt
+          retention-days: 1
+
+      - name: Build summary
+        if: always()
+        run: |
+          {
+            echo "## Linux Desktop Build"
+            echo ""
+            if ls radar-desktop_*.tar.gz 1>/dev/null 2>&1; then
+              echo "**Status:** Success"
+              ls -lh radar-desktop_*.tar.gz radar-desktop_*.deb radar-desktop_*.rpm 2>/dev/null | awk '{print "- `" $NF "` (" $5 ")"}'
+            else
+              echo "**Status:** Failed"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    name: Publish Desktop Assets
+    runs-on: ubuntu-latest
+    needs: [build-macos, build-windows, build-linux]
+    steps:
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: desktop-macos
+          path: dist
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: desktop-windows
+          path: dist
+
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: desktop-linux
+          path: dist
+
+      - name: Merge checksums
+        run: |
+          cd dist
+          cat checksums-darwin.txt checksums-windows.txt checksums-linux.txt > checksums-desktop.txt
+          rm -f checksums-darwin.txt checksums-windows.txt checksums-linux.txt
+          echo "=== Desktop checksums ==="
+          cat checksums-desktop.txt
+
+      - name: Wait for GitHub Release to exist
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.ref_name }}"
+          REPO="${{ github.repository }}"
+          echo "Waiting for release ${TAG} to exist..."
+          for i in $(seq 1 30); do
+            if gh release view "${TAG}" --repo "${REPO}" &>/dev/null; then
+              echo "Release ${TAG} found after ${i} attempt(s)"
+              exit 0
+            fi
+            echo "Attempt ${i}/30: release not found, waiting 30s..."
+            sleep 30
+          done
+          echo "::error::Release ${TAG} not found after 15 minutes"
+          exit 1
+
+      - name: Upload to GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd dist
+          for f in radar-desktop_* checksums-desktop.txt; do
+            echo "Uploading $f..."
+            gh release upload "${{ github.ref_name }}" "$f" --repo "${{ github.repository }}" --clobber
+          done
+
+      - name: Publish summary
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          {
+            echo "## Desktop Release ${VERSION}"
+            echo ""
+            if [[ "$VERSION" == *-* ]]; then
+              echo "> **Pre-release** — Homebrew cask and Scoop manifest not updated"
+              echo ""
+            fi
+            echo "### Uploaded Assets"
+            echo '```'
+            ls -lh dist/radar-desktop_* dist/checksums-desktop.txt 2>/dev/null | awk '{print $NF, $5}'
+            echo '```'
+            echo ""
+            echo "### Checksums"
+            echo '```'
+            cat dist/checksums-desktop.txt 2>/dev/null || echo "not available"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Update Homebrew cask
+        if: "!contains(github.ref_name, '-')"
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          VERSION_NUM="${VERSION#v}"
+          SHA256=$(sha256sum "dist/radar-desktop_${VERSION}_darwin_universal.zip" | awk '{print $1}')
+
+          git clone https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/skyhook-io/homebrew-tap.git /tmp/homebrew-tap
+          mkdir -p /tmp/homebrew-tap/Casks
+
+          cat > /tmp/homebrew-tap/Casks/radar-desktop.rb <<'CASK'
+          cask "radar-desktop" do
+            version "VERSION_PLACEHOLDER"
+            sha256 "SHA256_PLACEHOLDER"
+
+            url "https://github.com/skyhook-io/radar/releases/download/v#{version}/radar-desktop_v#{version}_darwin_universal.zip"
+            name "Radar"
+            desc "Kubernetes visibility — topology, traffic, and Helm management"
+            homepage "https://github.com/skyhook-io/radar"
+
+            app "Radar.app"
+
+            # No caveats needed — app is signed and notarized
+          end
+          CASK
+
+          sed -i "s/VERSION_PLACEHOLDER/${VERSION_NUM}/" /tmp/homebrew-tap/Casks/radar-desktop.rb
+          sed -i "s/SHA256_PLACEHOLDER/${SHA256}/" /tmp/homebrew-tap/Casks/radar-desktop.rb
+
+          cd /tmp/homebrew-tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Casks/radar-desktop.rb
+          if ! git diff --staged --quiet; then
+            git commit -m "Update radar-desktop cask to ${VERSION}"
+            git push origin main
+          fi
+
+      - name: Update Scoop manifest
+        if: "!contains(github.ref_name, '-')"
+        env:
+          SCOOP_BUCKET_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          VERSION_NUM="${VERSION#v}"
+          SHA256=$(sha256sum "dist/radar-desktop_${VERSION}_windows_amd64.zip" | awk '{print $1}')
+
+          git clone https://x-access-token:${SCOOP_BUCKET_TOKEN}@github.com/skyhook-io/scoop-bucket.git /tmp/scoop-bucket
+
+          cat > /tmp/scoop-bucket/radar-desktop.json <<EOF
+          {
+              "version": "${VERSION_NUM}",
+              "architecture": {
+                  "64bit": {
+                      "url": "https://github.com/skyhook-io/radar/releases/download/${VERSION}/radar-desktop_${VERSION}_windows_amd64.zip",
+                      "bin": [
+                          "Radar.exe"
+                      ],
+                      "shortcuts": [
+                          ["Radar.exe", "Radar"]
+                      ],
+                      "hash": "${SHA256}"
+                  }
+              },
+              "homepage": "https://github.com/skyhook-io/radar",
+              "license": "Apache-2.0",
+              "description": "Radar Desktop — Kubernetes visibility with topology, traffic, and Helm management",
+              "post_install": [
+                  "Write-Host 'Radar Desktop installed. Launch from Start Menu or run: radar-desktop' -ForegroundColor Green"
+              ]
+          }
+          EOF
+
+          cd /tmp/scoop-bucket
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add radar-desktop.json
+          if ! git diff --staged --quiet; then
+            git commit -m "Update radar-desktop to ${VERSION}"
+            git push origin main
+          fi

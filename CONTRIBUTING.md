@@ -1,0 +1,173 @@
+# Contributing to Radar
+
+Thank you for your interest in contributing to Radar! This document provides guidelines and instructions for contributing.
+
+## Code of Conduct
+
+By participating in this project, you agree to abide by our [Code of Conduct](CODE_OF_CONDUCT.md).
+
+## Get Help & Join the Community
+
+The fastest way to get help, ask questions, or share feedback is our [Discord community](https://radarhq.io/community/chat). Maintainers and other Radar users hang out there.
+
+For longer-form discussion, use [GitHub Discussions](https://github.com/skyhook-io/radar/discussions).
+
+## How to Contribute
+
+### Reporting Bugs
+
+Before creating a bug report, please check existing issues to avoid duplicates. When creating a bug report, include:
+
+- A clear, descriptive title
+- Steps to reproduce the issue
+- Expected behavior vs actual behavior
+- Your environment (OS, Go version, Node version, Kubernetes version)
+- Relevant logs or screenshots
+
+### Suggesting Features
+
+Feature requests are welcome! Please include:
+
+- A clear description of the feature
+- The problem it solves or use case it enables
+- Any alternative solutions you've considered
+
+### Pull Requests
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/my-feature`)
+3. Make your changes
+4. Run tests and ensure they pass
+5. Commit your changes (see commit message guidelines below)
+6. Push to your fork
+7. Open a Pull Request
+
+## Development Setup
+
+For detailed architecture, API reference, and release process, see [DEVELOPMENT.md](DEVELOPMENT.md).
+
+### Prerequisites
+
+- Go 1.26+
+- Node.js 20+
+- npm
+- Access to a Kubernetes cluster (minikube, kind, or remote)
+
+### Getting Started
+
+```bash
+# Clone your fork
+git clone https://github.com/YOUR_USERNAME/radar.git
+cd radar
+
+# Install all dependencies (Go + npm)
+make deps
+
+# Run in development mode
+# Terminal 1: Backend
+go run ./cmd/explorer --dev --no-browser
+
+# Terminal 2: Frontend with hot reload
+cd web
+npm run dev
+```
+
+### Running Tests
+
+```bash
+# Backend tests
+go test ./...
+
+# Frontend type check
+cd web
+npm run tsc
+```
+
+### Building
+
+```bash
+# Full build (frontend + embed + binary)
+make build
+
+# Frontend only (builds to web/dist)
+cd web && npm run build
+
+# IMPORTANT: Never run `go build` directly after `npm run build` —
+# it skips the embed step that copies web/dist → internal/static/dist.
+# Always use `make build` for a complete build.
+```
+
+## Project Structure
+
+```
+├── cmd/
+│   ├── explorer/       # CLI entry point
+│   └── desktop/        # Desktop app entry point (Wails v2)
+├── internal/
+│   ├── k8s/           # Kubernetes client and caching
+│   ├── server/        # HTTP server, REST API, SSE
+│   ├── helm/          # Helm SDK client and handlers
+│   ├── mcp/           # MCP (Model Context Protocol) server
+│   └── ...            # opencost, prometheus, config, settings, traffic
+├── pkg/
+│   ├── k8score/       # Shared K8s caching layer (informers, listers)
+│   ├── topology/      # Graph construction and relationships
+│   ├── ai/context/    # AI context minification
+│   └── timeline/      # Timeline event storage
+├── packages/k8s-ui/   # Shared UI package (@skyhook-io/k8s-ui)
+├── web/               # React frontend
+│   ├── src/
+│   │   ├── api/       # API client and hooks
+│   │   ├── components/# React components
+│   │   └── utils/     # Utilities
+│   └── package.json
+└── deploy/            # Docker, Helm, Krew configs
+```
+
+## Coding Standards
+
+### Go
+
+- Follow standard Go conventions and `gofmt`
+- Use meaningful variable and function names
+- Add comments for exported functions
+- Handle errors explicitly (no silent failures)
+
+### TypeScript/React
+
+- Use TypeScript strict mode
+- Prefer functional components with hooks
+- Use meaningful component and prop names
+
+### Commits
+
+We follow conventional commits:
+
+```
+type(scope): description
+
+[optional body]
+```
+
+Types: `feat`, `fix`, `docs`, `style`, `refactor`, `test`, `chore`
+
+Examples:
+- `feat(topology): add support for StatefulSets`
+- `fix(sse): handle reconnection on network errors`
+- `docs: update installation instructions`
+
+## Review Process
+
+1. All PRs require at least one approval
+2. CI checks must pass (tests, build)
+3. Keep PRs focused - one feature or fix per PR
+4. Respond to review feedback promptly
+
+## Getting Help
+
+- Open an issue for bugs or feature discussions
+- Check existing issues and PRs for context
+
+## License
+
+By contributing, you agree that your contributions will be licensed under the Apache 2.0 License.

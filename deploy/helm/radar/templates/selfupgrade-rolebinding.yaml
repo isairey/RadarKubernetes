@@ -1,0 +1,17 @@
+{{- if .Values.rbac.selfUpgrade -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "radar.fullname" . }}-self-upgrade
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "radar.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "radar.fullname" . }}-self-upgrade
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "radar.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

@@ -1,0 +1,61 @@
+/*
+ * @skyhook-io/k8s-ui Tailwind Theme
+ *
+ * Maps CSS variables to Tailwind v4 @theme tokens.
+ * Enables utility classes: bg-theme-surface, text-theme-text-primary, border-accent, etc.
+ * Import after variables.css.
+ */
+
+@theme inline {
+  /* Backgrounds */
+  --color-theme-base: var(--bg-base);
+  --color-theme-surface: var(--bg-surface);
+  --color-theme-elevated: var(--bg-elevated);
+  --color-theme-hover: var(--bg-hover);
+  --color-theme-active: var(--bg-active);
+
+  /* Text */
+  --color-theme-text-primary: var(--text-primary);
+  --color-theme-text-secondary: var(--text-secondary);
+  --color-theme-text-tertiary: var(--text-tertiary);
+  --color-theme-text-disabled: var(--text-disabled);
+
+  /* Borders */
+  --color-theme-border: var(--border-default);
+  --color-theme-border-light: var(--border-light);
+  --color-theme-border-subtle: var(--border-subtle);
+
+  /* Accent */
+  --color-accent: var(--accent);
+  --color-accent-light: var(--accent-light);
+  --color-accent-muted: var(--accent-muted);
+  --color-accent-text: var(--accent-text);
+
+  /* Skyhook brand (refined blue palette — more saturated) */
+  --color-skyhook: #5088CC;
+  --color-skyhook-50: #EBF2FA;
+  --color-skyhook-100: #D2E2F4;
+  --color-skyhook-200: #A8C7E8;
+  --color-skyhook-300: #7EACDC;
+  --color-skyhook-400: #6A9FE0;
+  --color-skyhook-500: #5088CC;
+  --color-skyhook-600: #4A7CC9;
+  --color-skyhook-700: #3B66A8;
+  --color-skyhook-800: #2D4E82;
+  --color-skyhook-900: #1F365C;
+
+  /* K8s resource type colors */
+  --color-k8s-internet: #5088CC;
+  --color-k8s-ingress: #8b5cf6;
+  --color-k8s-service: #3b82f6;
+  --color-k8s-deployment: #10b981;
+  --color-k8s-daemonset: #14b8a6;
+  --color-k8s-statefulset: #06b6d4;
+  --color-k8s-replicaset: #22c55e;
+  --color-k8s-pod: #84cc16;
+  --color-k8s-configmap: #f59e0b;
+  --color-k8s-secret: #ef4444;
+  --color-k8s-hpa: #ec4899;
+  --color-k8s-job: #a855f7;
+  --color-k8s-cronjob: #d946ef;
+}

@@ -1,0 +1,1222 @@
+import { useState, useEffect, useMemo, useRef, useCallback } from 'react'
+import { useRefreshAnimation } from '../../hooks/useRefreshAnimation'
+import { useTrafficSources, useTrafficFlows, useTrafficConnect, useSetTrafficSource } from '../../api/traffic'
+import { useClusterInfo } from '../../api/client'
+import type { TrafficWizardState, AggregatedFlow } from '../../types'
+import { TrafficWizard } from './TrafficWizard'
+import { TrafficGraph, type TrafficGraphSelection } from './TrafficGraph'
+import { TrafficFilterSidebar } from './TrafficFilterSidebar'
+import { TrafficFlowListProvider } from './TrafficFlowListContext'
+import { Loader2, RefreshCw, Filter, Plug, ChevronDown, List, Activity, AlertTriangle } from 'lucide-react'
+import { clsx } from 'clsx'
+import { useQueryClient } from '@tanstack/react-query'
+import { useDock } from '../dock'
+import { EmptyState, PaneLoader } from '@skyhook-io/k8s-ui'
+
+// Addon types for filtering
+export type AddonMode = 'show' | 'group' | 'hide'
+
+// Cluster addons that can be grouped/hidden (infrastructure, not traffic-flow)
+const CLUSTER_ADDON_NAMESPACES = new Set([
+  // Certificate management
+  'cert-manager',
+  // Secrets management
+  'external-secrets',
+  'sealed-secrets',
+  'vault',
+  // Backup
+  'velero',
+  // Monitoring & metrics
+  'gmp-system',
+  'gmp-public',
+  'datadog',
+  'monitoring',
+  'observability',
+  'opencost',
+  'prometheus',
+  'grafana',
+  'kube-state-metrics',
+  // Logging
+  'loki',
+  'logging',
+  'fluentd',
+  'fluentbit',
+  // DNS
+  'external-dns',
+  // Autoscaling
+  'cluster-autoscaler',
+  'karpenter',
+  'keda',
+  // GitOps & CI/CD
+  'argocd',
+  'argo-rollouts',
+  'argo-workflows',
+  'flux-system',
+  // Policy
+  'gatekeeper-system',
+  // Config management
+  'reloader',
+  // Database operators
+  'cloud-native-pg',
+  'cnpg-system',
+  'postgres-operator',
+  'mysql-operator',
+  'redis-operator',
+])
+
+// Addon workload names (for detection when namespace isn't enough)
+const CLUSTER_ADDON_NAMES = new Set([
+  'coredns',
+  'metrics-server',
+  'cluster-autoscaler',
+  'kube-dns',
+  'kube-state-metrics',
+  'reloader',
+])
+
+// Traffic-flow related addons that should NEVER be grouped/hidden
+// These are essential for understanding traffic patterns
+const TRAFFIC_FLOW_NAMESPACES = new Set([
+  'ingress-nginx',
+  'nginx-ingress',
+  'traefik',
+  'contour',
+  'kong',
+  'ambassador',
+  'emissary',
+  'haproxy-ingress',
+  'istio-system',
+  'istio-ingress',
+  'linkerd',
+  'consul',
+  'envoy-gateway-system',
+  'gateway-system',
+])
+
+const TRAFFIC_FLOW_NAMES = new Set([
+  'ingress-nginx-controller',
+  'nginx-ingress-controller',
+  'traefik',
+  'contour',
+  'envoy',
+  'kong',
+  'ambassador',
+  'istio-ingressgateway',
+  'istio-proxy',
+  'linkerd-proxy',
+])
+
+// Check if an endpoint is a cluster addon (can be grouped/hidden)
+// Exported for use in TrafficGraph
+export function isClusterAddon(name: string, namespace: string | undefined): boolean {
+  // Never treat traffic-flow addons as regular addons
+  if (namespace && TRAFFIC_FLOW_NAMESPACES.has(namespace)) return false
+  if (TRAFFIC_FLOW_NAMES.has(name)) return false
+
+  // Check namespace-based addons
+  if (namespace && CLUSTER_ADDON_NAMESPACES.has(namespace)) return true
+
+  // Check name-based addons
+  if (CLUSTER_ADDON_NAMES.has(name)) return true
+
+  // Check for common addon naming patterns
+  if (name.includes('prometheus') || name.includes('grafana') ||
+      name.includes('datadog') || name.includes('fluentd') ||
+      name.includes('metrics-server') || name.includes('coredns')) {
+    return true
+  }
+
+  return false
+}
+
+// System namespaces to hide by default
+const SYSTEM_NAMESPACES = new Set([
+  'kube-system',
+  'kube-public',
+  'kube-node-lease',
+  'cert-manager',
+  'caretta',
+  'cilium',
+  'calico-system',
+  'tigera-operator',
+  'gatekeeper-system',
+  'argo-rollouts',
+  'argocd',
+  'flux-system',
+  'monitoring',
+  'observability',
+  'istio-system',
+  'linkerd',
+  // Phase 1.1: Additional infrastructure namespaces
+  'node',           // Node-level traffic (often 35%+ of flows)
+  'gmp-system',     // GKE Managed Prometheus
+  'gmp-public',     // GKE Managed Prometheus public
+  'datadog',        // Datadog monitoring
+  'opencost',       // OpenCost
+  'external-dns',   // External DNS controller
+  'ingress-nginx',  // NGINX Ingress Controller
+  'traefik',        // Traefik
+  'velero',         // Velero backup
+  'vault',          // HashiCorp Vault
+  'external-secrets', // External Secrets Operator
+])
+
+// Detect internal load balancer IPs (appear as "external" but are internal)
+function isInternalLoadBalancer(name: string): boolean {
+  // GKE internal LB IPs (10.x.x.x range)
+  if (/^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(name)) return true
+  // AWS internal LB pattern (172.16-31.x.x)
+  if (/^172\.(1[6-9]|2[0-9]|3[0-1])\.\d{1,3}\.\d{1,3}$/.test(name)) return true
+  // Azure internal LB pattern
+  if (/^192\.168\.\d{1,3}\.\d{1,3}$/.test(name)) return true
+  return false
+}
+
+// Patterns for external service aggregation (Phase 4.2)
+const EXTERNAL_SERVICE_PATTERNS: { pattern: RegExp; display: string; category: string }[] = [
+  { pattern: /.*\.mongodb\.net\.?$/, display: 'MongoDB Atlas', category: 'database' },
+  { pattern: /.*\.mongodb\.com\.?$/, display: 'MongoDB Atlas', category: 'database' },
+  { pattern: /.*\.redis\.cloud\.?$/, display: 'Redis Cloud', category: 'database' },
+  { pattern: /.*\.rds\.amazonaws\.com\.?$/, display: 'AWS RDS', category: 'database' },
+  { pattern: /.*\.amazonaws\.com\.?$/, display: 'AWS Services', category: 'cloud' },
+  { pattern: /.*\.googleapis\.com\.?$/, display: 'Google APIs', category: 'cloud' },
+  // GCE VM patterns - various formats (IP.bc.googleusercontent.com, with/without trailing dot)
+  { pattern: /[\d.-]+\.bc\.googleusercontent\.com\.?$/i, display: 'GCE VMs', category: 'cloud' },
+  { pattern: /.*\.googleusercontent\.com\.?$/i, display: 'Google Cloud', category: 'cloud' },
+  { pattern: /.*\.azure\.com\.?$/, display: 'Azure Services', category: 'cloud' },
+  { pattern: /.*\.blob\.core\.windows\.net\.?$/, display: 'Azure Blob', category: 'cloud' },
+  { pattern: /.*\.sentry\.io\.?$/, display: 'Sentry', category: 'monitoring' },
+  { pattern: /.*\.datadoghq\.com\.?$/, display: 'Datadog', category: 'monitoring' },
+  { pattern: /.*\.stripe\.com\.?$/, display: 'Stripe', category: 'payment' },
+  { pattern: /.*\.auth0\.com\.?$/, display: 'Auth0', category: 'auth' },
+  { pattern: /.*\.okta\.com\.?$/, display: 'Okta', category: 'auth' },
+  { pattern: /.*\.sendgrid\.net\.?$/, display: 'SendGrid', category: 'email' },
+  { pattern: /.*\.mailgun\.org\.?$/, display: 'Mailgun', category: 'email' },
+  { pattern: /.*\.slack\.com\.?$/, display: 'Slack', category: 'messaging' },
+  { pattern: /.*\.twilio\.com\.?$/, display: 'Twilio', category: 'messaging' },
+]
+
+// Port-based service detection (when hostname doesn't give enough info)
+const PORT_SERVICE_MAP: Record<number, { name: string; category: string }> = {
+  27017: { name: 'MongoDB', category: 'database' },
+  27018: { name: 'MongoDB', category: 'database' },
+  5432: { name: 'PostgreSQL', category: 'database' },
+  3306: { name: 'MySQL', category: 'database' },
+  6379: { name: 'Redis', category: 'database' },
+  9042: { name: 'Cassandra', category: 'database' },
+  9200: { name: 'Elasticsearch', category: 'database' },
+  9300: { name: 'Elasticsearch', category: 'database' },
+  443: { name: 'HTTPS', category: 'web' },
+  80: { name: 'HTTP', category: 'web' },
+  8080: { name: 'HTTP', category: 'web' },
+  8443: { name: 'HTTPS', category: 'web' },
+  5672: { name: 'RabbitMQ', category: 'messaging' },
+  9092: { name: 'Kafka', category: 'messaging' },
+  4222: { name: 'NATS', category: 'messaging' },
+  11211: { name: 'Memcached', category: 'cache' },
+  25: { name: 'SMTP', category: 'email' },
+  587: { name: 'SMTP', category: 'email' },
+  53: { name: 'DNS', category: 'infra' },
+  22: { name: 'SSH', category: 'infra' },
+}
+
+// Get aggregated display name for external services (considers both hostname and port)
+function getExternalServiceName(name: string, port?: number): { name: string; aggregated: boolean; category?: string } {
+  // Check for port-based service first (more reliable than hostname guessing)
+  const portService = port ? PORT_SERVICE_MAP[port] : undefined
+
+  // Try hostname patterns
+  for (const { pattern, display, category } of EXTERNAL_SERVICE_PATTERNS) {
+    if (pattern.test(name)) {
+      // If we also have port info, combine them for clarity (e.g., "MongoDB (GCE VMs)")
+      if (portService && display !== portService.name) {
+        return { name: `${portService.name} (${display})`, aggregated: true, category: portService.category }
+      }
+      return { name: display, aggregated: true, category }
+    }
+  }
+
+  // If hostname doesn't match but we have a known port, aggregate by service type
+  if (portService) {
+    return { name: portService.name, aggregated: true, category: portService.category }
+  }
+
+  return { name, aggregated: false }
+}
+
+
+// Cilium reserved identities (internal infrastructure traffic)
+const CILIUM_RESERVED_IDENTITIES = new Set([
+  'host',       // Node-level traffic
+  'health',     // Cilium health probes
+  'init',       // Initialization identity
+  'unmanaged',  // Unmanaged endpoints
+])
+
+// Check if an address is IPv6 link-local or multicast (infrastructure noise)
+function isIPv6Infrastructure(name: string): boolean {
+  // Link-local (fe80::/10)
+  if (name.toLowerCase().startsWith('fe80:')) return true
+  // Multicast (ff00::/8) - includes ff02::2 (all routers), ff02::1 (all nodes), etc.
+  if (name.toLowerCase().startsWith('ff0')) return true
+  return false
+}
+
+// Check if an endpoint is a system/infrastructure component
+function isSystemEndpoint(name: string, namespace: string | undefined, kind: string): boolean {
+  // System namespaces
+  if (namespace && SYSTEM_NAMESPACES.has(namespace)) {
+    return true
+  }
+
+  // Cilium reserved identities (show up as External kind with reserved names)
+  if (kind === 'External' && CILIUM_RESERVED_IDENTITIES.has(name)) {
+    return true
+  }
+
+  // IPv6 link-local and multicast addresses (infrastructure noise)
+  if (isIPv6Infrastructure(name)) {
+    return true
+  }
+
+  // Node-level traffic
+  if (kind === 'node' || kind === 'Node') {
+    return true
+  }
+
+  // Cloud metadata services (AWS, GCE, Azure)
+  if (name.startsWith('169.254.') || name === 'instance-data.ec2.internal') {
+    return true
+  }
+  if (name === 'metadata.google.internal' || name === 'metadata.google.internal.') {
+    return true
+  }
+  if (name === 'metadata.azure.com' || name.endsWith('.metadata.azure.com')) {
+    return true
+  }
+
+  // Localhost / loopback traffic (within-pod communication, health checks)
+  if (name === '127.0.0.1' || name === 'localhost' || name.startsWith('127.')) {
+    return true
+  }
+
+  // 0.0.0.0 - binding address, not a real destination
+  if (name === '0.0.0.0') {
+    return true
+  }
+
+  // Kubernetes API server in default namespace
+  if (namespace === 'default' && name === 'kubernetes') {
+    return true
+  }
+
+  // IP-based names (internal cluster IPs)
+  if (/^\d{1,3}-\d{1,3}-\d{1,3}-\d{1,3}\./.test(name)) {
+    return true
+  }
+
+  // EC2 instance hostnames
+  if (/^ec2-\d+-\d+-\d+-\d+\./.test(name) || /^ip-\d+-\d+-\d+-\d+\./.test(name)) {
+    return true
+  }
+
+  // Internal load balancer IPs that appear as "external"
+  if (kind === 'External' && isInternalLoadBalancer(name)) {
+    return true
+  }
+
+  return false
+}
+
+// Helper to check if endpoint is external (case-insensitive)
+function isExternal(kind: string): boolean {
+  return kind.toLowerCase() === 'external'
+}
+
+interface TrafficViewProps {
+  namespaces: string[]
+}
+
+export function TrafficView({ namespaces }: TrafficViewProps) {
+  const [wizardState, setWizardState] = useState<TrafficWizardState>('detecting')
+  const [timeRange, setTimeRange] = useState<string>('5m')
+  const [hideSystem, setHideSystem] = useState(true)
+  const [hideExternal, setHideExternal] = useState(false)
+  const [minConnections, setMinConnections] = useState(0)
+  const [showNamespaceGroups, setShowNamespaceGroups] = useState(true)
+  const [aggregateExternal, setAggregateExternal] = useState(true)
+  const [detectServices, setDetectServices] = useState(true)
+  const [collapseInternet, setCollapseInternet] = useState(true)
+  const [addonMode, setAddonMode] = useState<AddonMode>('show')
+  const [graphSelection, setGraphSelection] = useState<TrafficGraphSelection | null>(null)
+  const dock = useDock()
+
+  // Dock: offset past sidebar, close flows tab on unmount
+  const flowsTabIdRef = useRef<string | null>(null)
+  useEffect(() => {
+    dock.setLeftOffset(288)
+    return () => {
+      dock.setLeftOffset(0)
+      // Close the flows tab when leaving traffic view
+      if (flowsTabIdRef.current) {
+        dock.removeTab(flowsTabIdRef.current)
+        flowsTabIdRef.current = null
+      }
+    }
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const [hiddenNamespaces, setHiddenNamespaces] = useState<Set<string>>(new Set())
+  // L7 filters (Hubble-only)
+  const [l7Protocol, setL7Protocol] = useState<string>('all')
+  const [l7Methods, setL7Methods] = useState<Set<string>>(new Set())
+  const [l7StatusRanges, setL7StatusRanges] = useState<Set<string>>(new Set())
+  const [l7Verdicts, setL7Verdicts] = useState<Set<string>>(new Set())
+  const [dnsPattern, setDnsPattern] = useState('')
+  const [isConnecting, setIsConnecting] = useState(false)
+  const [connectionError, setConnectionError] = useState<string | null>(null)
+  const queryClient = useQueryClient()
+  const connectMutation = useTrafficConnect()
+  const setSourceMutation = useSetTrafficSource()
+  const hasAutoConnectedRef = useRef(false)
+  const [sourcePickerOpen, setSourcePickerOpen] = useState(false)
+  const sourcePickerRef = useRef<HTMLDivElement>(null)
+
+  // Track cluster context to reset state on cluster change
+  const { data: clusterInfo } = useClusterInfo()
+  const lastClusterRef = useRef<string | null>(null)
+
+  // Reset state when cluster context changes
+  useEffect(() => {
+    const currentCluster = clusterInfo?.context || null
+    if (lastClusterRef.current !== null && lastClusterRef.current !== currentCluster) {
+      // Cluster changed - reset wizard state and invalidate traffic queries
+      setWizardState('detecting')
+      setConnectionError(null)
+      hasAutoConnectedRef.current = false
+      queryClient.invalidateQueries({ queryKey: ['traffic-sources'] })
+      queryClient.invalidateQueries({ queryKey: ['traffic-flows'] })
+      queryClient.invalidateQueries({ queryKey: ['traffic-connection'] })
+    }
+    lastClusterRef.current = currentCluster
+  }, [clusterInfo?.context, queryClient])
+
+  // Close source picker on outside click (capture phase to beat ReactFlow)
+  useEffect(() => {
+    if (!sourcePickerOpen) return
+    const handler = (e: MouseEvent) => {
+      if (sourcePickerRef.current && !sourcePickerRef.current.contains(e.target as Node)) {
+        setSourcePickerOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handler, true)
+    return () => document.removeEventListener('mousedown', handler, true)
+  }, [sourcePickerOpen])
+
+  const {
+    data: sourcesData,
+    isLoading: sourcesLoading,
+    refetch: refetchSources,
+  } = useTrafficSources()
+
+  const {
+    data: flowsData,
+    isLoading: flowsLoading,
+    isFetching: flowsFetching,
+    refetch: refetchFlowsRaw,
+  } = useTrafficFlows({
+    namespaces,
+    since: timeRange,
+    // Only fetch flows when connected (not connecting and no connection error)
+    enabled: wizardState === 'ready' && !isConnecting && !connectionError,
+  })
+  const [refetchFlows, isRefreshAnimating] = useRefreshAnimation(refetchFlowsRaw)
+
+  // Auto-retry when flows return with warning but no data (e.g., port-forward not ready yet)
+  useEffect(() => {
+    if (flowsData?.warning && (!flowsData.aggregated || flowsData.aggregated.length === 0) && !flowsFetching) {
+      const timer = setTimeout(() => refetchFlowsRaw(), 2000)
+      return () => clearTimeout(timer)
+    }
+  }, [flowsData, flowsFetching, refetchFlowsRaw])
+
+  // Filter flows based on user preferences
+  // Note: namespace filtering is done server-side via the global namespace selector
+  const filteredFlows = useMemo<AggregatedFlow[]>(() => {
+    if (!flowsData?.aggregated) return []
+
+    return flowsData.aggregated.filter(flow => {
+      const sourceIsSystem = isSystemEndpoint(flow.source.name, flow.source.namespace, flow.source.kind)
+      const destIsSystem = isSystemEndpoint(flow.destination.name, flow.destination.namespace, flow.destination.kind)
+
+      // If hiding system, skip flows where EITHER endpoint is a system component
+      if (hideSystem && (sourceIsSystem || destIsSystem)) {
+        return false
+      }
+
+      // Always filter out non-useful traffic (regardless of hideSystem setting)
+      const isAlwaysFiltered = (name: string) =>
+        // Cloud metadata services
+        name === 'metadata.google.internal' ||
+        name === 'metadata.google.internal.' ||
+        name.startsWith('169.254.') ||
+        name === 'instance-data.ec2.internal' ||
+        // Loopback / bind addresses - not real traffic
+        name === 'localhost' ||
+        name === '127.0.0.1' ||
+        name.startsWith('127.') ||
+        name === '0.0.0.0'
+
+      if (isAlwaysFiltered(flow.source.name) || isAlwaysFiltered(flow.destination.name)) {
+        return false
+      }
+
+      // If hiding external, skip flows with external endpoints
+      if (hideExternal) {
+        if (isExternal(flow.source.kind) || isExternal(flow.destination.kind)) {
+          return false
+        }
+      }
+
+      // Addon mode: hide
+      if (addonMode === 'hide') {
+        const sourceIsAddon = isClusterAddon(flow.source.name, flow.source.namespace)
+        const destIsAddon = isClusterAddon(flow.destination.name, flow.destination.namespace)
+        if (sourceIsAddon || destIsAddon) {
+          return false
+        }
+      }
+
+      // Connection threshold filter
+      if (flow.connections < minConnections) {
+        return false
+      }
+
+      // Filter by hidden namespaces - hide flow if EITHER endpoint is in a hidden namespace
+      if (hiddenNamespaces.size > 0) {
+        const sourceNs = flow.source.namespace
+        const destNs = flow.destination.namespace
+        if (sourceNs && hiddenNamespaces.has(sourceNs)) return false
+        if (destNs && hiddenNamespaces.has(destNs)) return false
+      }
+
+      // Protocol filter
+      if (l7Protocol === 'HTTP' && flow.l7Protocol !== 'HTTP') return false
+      if (l7Protocol === 'DNS' && flow.l7Protocol !== 'DNS') return false
+      if (l7Protocol === 'TCP' && flow.l7Protocol) return false // TCP = no L7
+
+      // L7 sub-filters (only apply when active)
+      if (l7Methods.size > 0) {
+        if (!flow.topHTTPPaths?.some(p => l7Methods.has(p.method))) return false
+      }
+      if (l7StatusRanges.size > 0) {
+        if (!flow.httpStatusCounts || !Array.from(l7StatusRanges).some(r => (flow.httpStatusCounts?.[r] ?? 0) > 0)) return false
+      }
+      if (l7Verdicts.size > 0) {
+        if (!flow.verdictCounts || !Array.from(l7Verdicts).some(v => (flow.verdictCounts?.[v] ?? 0) > 0)) return false
+      }
+      if (dnsPattern) {
+        const pattern = dnsPattern.toLowerCase()
+        if (!flow.topDNSQueries?.some(q => q.query.toLowerCase().includes(pattern))) return false
+      }
+
+      return true
+    })
+  }, [flowsData?.aggregated, hideSystem, hideExternal, minConnections, hiddenNamespaces, addonMode, l7Protocol, l7Methods, l7StatusRanges, l7Verdicts, dnsPattern])
+
+  // Filter raw flows with the same base filters (for list view)
+  const filteredRawFlows = useMemo(() => {
+    if (!flowsData?.flows) return []
+    return flowsData.flows.filter(flow => {
+      const sourceIsSystem = isSystemEndpoint(flow.source.name, flow.source.namespace, flow.source.kind)
+      const destIsSystem = isSystemEndpoint(flow.destination.name, flow.destination.namespace, flow.destination.kind)
+      if (hideSystem && (sourceIsSystem || destIsSystem)) return false
+
+      const isAlwaysFiltered = (name: string) =>
+        name === 'metadata.google.internal' || name === 'metadata.google.internal.' ||
+        name.startsWith('169.254.') || name === 'instance-data.ec2.internal' ||
+        name === 'localhost' || name === '127.0.0.1' || name.startsWith('127.') || name === '0.0.0.0'
+      if (isAlwaysFiltered(flow.source.name) || isAlwaysFiltered(flow.destination.name)) return false
+
+      if (hideExternal && (isExternal(flow.source.kind) || isExternal(flow.destination.kind))) return false
+
+      if (addonMode === 'hide') {
+        if (isClusterAddon(flow.source.name, flow.source.namespace) || isClusterAddon(flow.destination.name, flow.destination.namespace)) return false
+      }
+
+      if (hiddenNamespaces.size > 0) {
+        if (flow.source.namespace && hiddenNamespaces.has(flow.source.namespace)) return false
+        if (flow.destination.namespace && hiddenNamespaces.has(flow.destination.namespace)) return false
+      }
+
+      // Protocol filter
+      if (l7Protocol === 'HTTP' && flow.l7Protocol !== 'HTTP') return false
+      if (l7Protocol === 'DNS' && flow.l7Protocol !== 'DNS') return false
+      if (l7Protocol === 'TCP' && flow.l7Protocol) return false
+
+      // L7 sub-filters on individual flow fields
+      if (l7Methods.size > 0) {
+        if (!flow.httpMethod || !l7Methods.has(flow.httpMethod)) return false
+      }
+      if (l7StatusRanges.size > 0) {
+        if (!flow.httpStatus) return false
+        const bucket = `${Math.floor(flow.httpStatus / 100)}xx`
+        if (!l7StatusRanges.has(bucket)) return false
+      }
+      if (l7Verdicts.size > 0) {
+        if (!flow.verdict || !l7Verdicts.has(flow.verdict)) return false
+      }
+      if (dnsPattern) {
+        if (!flow.dnsQuery || !flow.dnsQuery.toLowerCase().includes(dnsPattern.toLowerCase())) return false
+      }
+
+      return true
+    })
+  }, [flowsData?.flows, hideSystem, hideExternal, hiddenNamespaces, addonMode, l7Protocol, l7Methods, l7StatusRanges, l7Verdicts, dnsPattern])
+
+  // Apply graph selection to filter raw flows for the list panel
+  const listFlows = useMemo(() => {
+    if (!graphSelection) return filteredRawFlows
+    if (graphSelection.type === 'node' && graphSelection.nodeId) {
+      const id = graphSelection.nodeId
+      return filteredRawFlows.filter(f => {
+        const srcId = f.source.namespace ? `${f.source.namespace}/${f.source.name}` : f.source.name
+        const dstId = f.destination.namespace ? `${f.destination.namespace}/${f.destination.name}` : f.destination.name
+        return srcId === id || dstId === id
+      })
+    }
+    if (graphSelection.type === 'edge' && graphSelection.sourceId && graphSelection.destId) {
+      return filteredRawFlows.filter(f => {
+        const srcId = f.source.namespace ? `${f.source.namespace}/${f.source.name}` : f.source.name
+        const dstId = f.destination.namespace ? `${f.destination.namespace}/${f.destination.name}` : f.destination.name
+        // Match either direction (request goes A→B, response goes B→A)
+        return (srcId === graphSelection.sourceId && dstId === graphSelection.destId) ||
+               (srcId === graphSelection.destId && dstId === graphSelection.sourceId)
+      })
+    }
+    return filteredRawFlows
+  }, [filteredRawFlows, graphSelection])
+
+  // Open flow list in the bottom dock
+  const openFlowListDock = useCallback(() => {
+    const id = dock.addTab({ type: 'traffic-flows', title: 'Traffic Flows' })
+    flowsTabIdRef.current = id
+  }, [dock])
+
+  // Auto-open flows dock when Hubble raw flows are available
+  const hasAutoOpenedFlowsRef = useRef(false)
+  useEffect(() => {
+    if (flowsData?.flows && flowsData.flows.length > 0 && !hasAutoOpenedFlowsRef.current) {
+      hasAutoOpenedFlowsRef.current = true
+      openFlowListDock()
+    }
+  }, [flowsData?.flows, openFlowListDock])
+
+  // Show L7 filters only when flows actually contain L7 data
+  const hasL7Data = useMemo(() => {
+    if (!flowsData?.aggregated) return false
+    return flowsData.aggregated.some(f => f.l7Protocol || f.topHTTPPaths || f.topDNSQueries)
+  }, [flowsData?.aggregated])
+
+  // Toggle L7 filter helpers
+  const toggleL7Method = useCallback((method: string) => {
+    setL7Methods(prev => { const next = new Set(prev); next.has(method) ? next.delete(method) : next.add(method); return next })
+  }, [])
+  const toggleL7StatusRange = useCallback((range: string) => {
+    setL7StatusRanges(prev => { const next = new Set(prev); next.has(range) ? next.delete(range) : next.add(range); return next })
+  }, [])
+  const toggleL7Verdict = useCallback((verdict: string) => {
+    setL7Verdicts(prev => { const next = new Set(prev); next.has(verdict) ? next.delete(verdict) : next.add(verdict); return next })
+  }, [])
+
+  // Toggle namespace visibility
+  const toggleNamespace = useCallback((ns: string) => {
+    setHiddenNamespaces(prev => {
+      const next = new Set(prev)
+      if (next.has(ns)) {
+        next.delete(ns)
+      } else {
+        next.add(ns)
+      }
+      return next
+    })
+  }, [])
+
+  // Process flows for external service aggregation (Phase 4.2)
+  // Also tracks service categories for coloring external nodes
+  const { processedFlows, serviceCategories } = useMemo<{
+    processedFlows: AggregatedFlow[]
+    serviceCategories: Map<string, string>
+  }>(() => {
+    const categories = new Map<string, string>()
+
+    // Helper to get service info (optionally using port-based detection)
+    const getServiceInfo = (name: string, port: number) => {
+      return getExternalServiceName(name, detectServices ? port : undefined)
+    }
+
+    if (!aggregateExternal) {
+      // Even without aggregation, detect service categories for coloring (destinations only)
+      filteredFlows.forEach(flow => {
+        if (isExternal(flow.destination.kind)) {
+          const info = getServiceInfo(flow.destination.name, flow.port)
+          if (info.category) {
+            categories.set(flow.destination.name, info.category)
+          }
+        }
+        // Don't apply port-based detection to sources - port tells us the destination service
+      })
+      return { processedFlows: filteredFlows, serviceCategories: categories }
+    }
+
+    // Aggregate flows to the same external service
+    const aggregatedMap = new Map<string, AggregatedFlow>()
+
+    filteredFlows.forEach(flow => {
+      // Only aggregate destinations based on port/hostname - sources keep their original name
+      // Port-based detection (MongoDB:27017) only makes sense for destinations
+      const sourceAgg = isExternal(flow.source.kind)
+        ? getExternalServiceName(flow.source.name) // No port - hostname patterns only
+        : { name: flow.source.name, aggregated: false }
+      const destAgg = isExternal(flow.destination.kind)
+        ? getServiceInfo(flow.destination.name, flow.port) // Full detection with port
+        : { name: flow.destination.name, aggregated: false }
+
+      // Track categories for coloring (destinations only - sources don't get port-based categories)
+      if (destAgg.category) categories.set(destAgg.name, destAgg.category)
+
+      // Create a unique key for the aggregated flow (without port since we aggregate by service)
+      const sourceKey = flow.source.namespace
+        ? `${flow.source.namespace}/${sourceAgg.name}`
+        : sourceAgg.name
+      const destKey = flow.destination.namespace
+        ? `${flow.destination.namespace}/${destAgg.name}`
+        : destAgg.name
+      // Group by service name, not by port (all MongoDB connections become one edge)
+      const key = `${sourceKey}->${destKey}`
+
+      const existing = aggregatedMap.get(key)
+      if (existing) {
+        // Merge connections and bytes
+        existing.connections += flow.connections
+        existing.bytesSent += flow.bytesSent
+        existing.bytesRecv += flow.bytesRecv
+        existing.flowCount += flow.flowCount
+        if (flow.requestCount) {
+          existing.requestCount = (existing.requestCount || 0) + flow.requestCount
+        }
+        if (flow.errorCount) {
+          existing.errorCount = (existing.errorCount || 0) + flow.errorCount
+        }
+      } else {
+        // Create new aggregated flow with modified names
+        aggregatedMap.set(key, {
+          ...flow,
+          source: sourceAgg.aggregated
+            ? { ...flow.source, name: sourceAgg.name }
+            : flow.source,
+          destination: destAgg.aggregated
+            ? { ...flow.destination, name: destAgg.name }
+            : flow.destination,
+        })
+      }
+    })
+
+    return { processedFlows: Array.from(aggregatedMap.values()), serviceCategories: categories }
+  }, [filteredFlows, aggregateExternal, detectServices])
+
+  // Collapse inbound internet traffic (external sources → internal destinations)
+  const internetCollapsedFlows = useMemo<AggregatedFlow[]>(() => {
+    if (!collapseInternet) return processedFlows
+
+    // Group flows where external sources connect to internal destinations
+    const internetFlowsMap = new Map<string, AggregatedFlow>() // destKey -> aggregated flow
+    const nonInternetFlows: AggregatedFlow[] = []
+
+    processedFlows.forEach(flow => {
+      const sourceIsExternal = isExternal(flow.source.kind)
+      const destIsInternal = !isExternal(flow.destination.kind)
+
+      // Only collapse external → internal flows (inbound internet traffic)
+      if (sourceIsExternal && destIsInternal) {
+        // Create a key based on destination + port
+        const destKey = flow.destination.namespace
+          ? `${flow.destination.namespace}/${flow.destination.name}:${flow.port}`
+          : `${flow.destination.name}:${flow.port}`
+
+        const existing = internetFlowsMap.get(destKey)
+        if (existing) {
+          // Merge into existing "Internet" flow
+          existing.connections += flow.connections
+          existing.bytesSent += flow.bytesSent
+          existing.bytesRecv += flow.bytesRecv
+          existing.flowCount += flow.flowCount
+        } else {
+          // Create new "Internet" → destination flow
+          internetFlowsMap.set(destKey, {
+            ...flow,
+            source: {
+              name: 'Internet',
+              namespace: '',
+              kind: 'Internet',
+            },
+          })
+        }
+      } else {
+        nonInternetFlows.push(flow)
+      }
+    })
+
+    return [...nonInternetFlows, ...Array.from(internetFlowsMap.values())]
+  }, [processedFlows, collapseInternet])
+
+  // When grouping addons:
+  // 1. Aggregate internet → addon into single edge to group
+  // 2. Aggregate addon → kubernetes into single edge from group
+  const finalFlows = useMemo<AggregatedFlow[]>(() => {
+    if (addonMode !== 'group') return internetCollapsedFlows
+
+    // Track totals for aggregated edges
+    let addonInternetTotal = 0
+    let addonToK8sTotal = 0
+    const processedFlows: AggregatedFlow[] = []
+
+    // Check if destination is the kubernetes API server
+    const isKubernetesAPI = (name: string, namespace: string | undefined) => {
+      return name === 'kubernetes' && (!namespace || namespace === 'default')
+    }
+
+    internetCollapsedFlows.forEach(flow => {
+      const sourceIsAddon = isClusterAddon(flow.source.name, flow.source.namespace)
+      const destIsAddon = isClusterAddon(flow.destination.name, flow.destination.namespace)
+      const sourceIsInternet = flow.source.kind === 'Internet'
+      const destIsK8sAPI = isKubernetesAPI(flow.destination.name, flow.destination.namespace)
+
+      // Internet → Addon: aggregate into single edge to group
+      if (sourceIsInternet && destIsAddon) {
+        addonInternetTotal += flow.connections
+        processedFlows.push({
+          ...flow,
+          source: {
+            name: 'addon-internet',
+            namespace: '',
+            kind: 'SkipEdge', // Create addon node but skip individual edge
+          },
+        })
+      }
+      // Addon → Kubernetes API: aggregate into single edge from group
+      else if (sourceIsAddon && destIsK8sAPI) {
+        addonToK8sTotal += flow.connections
+        processedFlows.push({
+          ...flow,
+          destination: {
+            ...flow.destination,
+            kind: 'SkipEdge', // Create kubernetes node but skip individual edge
+          },
+        })
+      }
+      else {
+        processedFlows.push(flow)
+      }
+    })
+
+    // Add virtual flow for Internet → Addon Group edge
+    if (addonInternetTotal > 0) {
+      processedFlows.push({
+        source: {
+          name: 'addon-internet',
+          namespace: '',
+          kind: 'AddonInternet',
+        },
+        destination: {
+          name: 'addon-group-target',
+          namespace: '',
+          kind: 'AddonGroupTarget',
+        },
+        protocol: 'tcp',
+        port: 0,
+        connections: addonInternetTotal,
+        bytesSent: 0,
+        bytesRecv: 0,
+        flowCount: 1,
+        lastSeen: new Date().toISOString(),
+      })
+    }
+
+    // Add virtual flow for Addon Group → Kubernetes edge
+    if (addonToK8sTotal > 0) {
+      processedFlows.push({
+        source: {
+          name: 'addon-group-source',
+          namespace: '',
+          kind: 'AddonGroupSource',
+        },
+        destination: {
+          name: 'kubernetes',
+          namespace: 'default',
+          kind: 'Service',
+        },
+        protocol: 'tcp',
+        port: 443,
+        connections: addonToK8sTotal,
+        bytesSent: 0,
+        bytesRecv: 0,
+        flowCount: 1,
+        lastSeen: new Date().toISOString(),
+      })
+    }
+
+    return processedFlows
+  }, [internetCollapsedFlows, addonMode])
+
+  // Stats for display
+  const flowStats = useMemo(() => {
+    const total = flowsData?.aggregated?.length || 0
+    const filtered = filteredFlows.length
+    const shown = finalFlows.length
+    const hidden = total - filtered
+    const aggregated = filtered - shown
+    return { total, filtered, shown, hidden, aggregated }
+  }, [flowsData?.aggregated?.length, filteredFlows.length, finalFlows.length])
+
+  // Compute hot path threshold (top 10% of connections)
+  const hotPathThreshold = useMemo(() => {
+    if (finalFlows.length === 0) return 0
+    const connectionCounts = finalFlows.map(f => f.connections).sort((a, b) => b - a)
+    const topTenPercentIndex = Math.max(0, Math.floor(connectionCounts.length * 0.1) - 1)
+    return connectionCounts[topTenPercentIndex] || connectionCounts[0] || 0
+  }, [finalFlows])
+
+  // Extract unique namespaces with node counts (from filtered flows, excluding namespace filter itself)
+  // This shows only namespaces that pass other filters (hideSystem, hideExternal, minConnections)
+  const namespacesWithCounts = useMemo(() => {
+    const nsCounts = new Map<string, Set<string>>() // namespace -> set of node names
+
+    // Use flows filtered by everything EXCEPT namespace filter
+    const flows = (flowsData?.aggregated || []).filter(flow => {
+      const sourceIsSystem = isSystemEndpoint(flow.source.name, flow.source.namespace, flow.source.kind)
+      const destIsSystem = isSystemEndpoint(flow.destination.name, flow.destination.namespace, flow.destination.kind)
+
+      if (hideSystem && (sourceIsSystem || destIsSystem)) {
+        return false
+      }
+
+      if (hideExternal) {
+        if (isExternal(flow.source.kind) || isExternal(flow.destination.kind)) {
+          return false
+        }
+      }
+
+      if (flow.connections < minConnections) {
+        return false
+      }
+
+      return true
+    })
+
+    flows.forEach(flow => {
+      // Count source nodes
+      if (flow.source.namespace && flow.source.kind.toLowerCase() !== 'external') {
+        if (!nsCounts.has(flow.source.namespace)) {
+          nsCounts.set(flow.source.namespace, new Set())
+        }
+        nsCounts.get(flow.source.namespace)!.add(flow.source.name)
+      }
+      // Count destination nodes
+      if (flow.destination.namespace && flow.destination.kind.toLowerCase() !== 'external') {
+        if (!nsCounts.has(flow.destination.namespace)) {
+          nsCounts.set(flow.destination.namespace, new Set())
+        }
+        nsCounts.get(flow.destination.namespace)!.add(flow.destination.name)
+      }
+    })
+
+    return Array.from(nsCounts.entries()).map(([name, nodes]) => ({
+      name,
+      nodeCount: nodes.size,
+    }))
+  }, [flowsData?.aggregated, hideSystem, hideExternal, minConnections])
+
+  // Determine wizard state based on sources detection
+  useEffect(() => {
+    if (sourcesLoading) {
+      setWizardState('detecting')
+      return
+    }
+
+    if (!sourcesData) {
+      setWizardState('not_found')
+      return
+    }
+
+    // Only consider sources with status 'available' as ready
+    const availableSources = sourcesData.detected.filter(s => s.status === 'available')
+    if (availableSources.length > 0) {
+      setWizardState('ready')
+    } else {
+      setWizardState('not_found')
+    }
+  }, [sourcesData, sourcesLoading])
+
+  // Shared connection handler — used by auto-connect and retry buttons
+  const handleConnect = useCallback(() => {
+    setIsConnecting(true)
+    setConnectionError(null)
+    queryClient.removeQueries({ queryKey: ['traffic-flows'] })
+
+    connectMutation.mutate(undefined, {
+      onSuccess: (data) => {
+        setIsConnecting(false)
+        if (!data.connected && data.error) {
+          setConnectionError(data.error)
+          hasAutoConnectedRef.current = false // allow retry
+        }
+      },
+      onError: (error) => {
+        setIsConnecting(false)
+        setConnectionError(error.message)
+        hasAutoConnectedRef.current = false // allow retry
+      },
+    })
+  }, [connectMutation, queryClient])
+
+  // Auto-connect when source is detected
+  useEffect(() => {
+    if (wizardState === 'ready' && !hasAutoConnectedRef.current && !isConnecting) {
+      hasAutoConnectedRef.current = true
+      handleConnect()
+    }
+  }, [wizardState, isConnecting, handleConnect])
+
+  // Show wizard if no traffic source detected
+  if (wizardState !== 'ready') {
+    return (
+      <TrafficWizard
+        state={wizardState}
+        setState={setWizardState}
+        sourcesData={sourcesData}
+        sourcesLoading={sourcesLoading}
+        onRefetch={refetchSources}
+      />
+    )
+  }
+
+  return (
+    <TrafficFlowListProvider flows={listFlows} graphSelection={graphSelection} clearSelection={() => setGraphSelection(null)}>
+    <div className="flex h-full w-full">
+      {/* Sidebar */}
+      <TrafficFilterSidebar
+        hideSystem={hideSystem}
+        setHideSystem={setHideSystem}
+        hideExternal={hideExternal}
+        setHideExternal={setHideExternal}
+        minConnections={minConnections}
+        setMinConnections={setMinConnections}
+        showNamespaceGroups={showNamespaceGroups}
+        setShowNamespaceGroups={setShowNamespaceGroups}
+        collapseInternet={collapseInternet}
+        setCollapseInternet={setCollapseInternet}
+        addonMode={addonMode}
+        setAddonMode={setAddonMode}
+        aggregateExternal={aggregateExternal}
+        setAggregateExternal={setAggregateExternal}
+        detectServices={detectServices}
+        setDetectServices={setDetectServices}
+        timeRange={timeRange}
+        setTimeRange={setTimeRange}
+        isHubble={sourcesData?.active === 'hubble' && hasL7Data}
+        l7Protocol={l7Protocol}
+        setL7Protocol={setL7Protocol}
+        l7Methods={l7Methods}
+        onToggleL7Method={toggleL7Method}
+        l7StatusRanges={l7StatusRanges}
+        onToggleL7StatusRange={toggleL7StatusRange}
+        l7Verdicts={l7Verdicts}
+        onToggleL7Verdict={toggleL7Verdict}
+        dnsPattern={dnsPattern}
+        setDnsPattern={setDnsPattern}
+        namespaces={namespacesWithCounts}
+        hiddenNamespaces={hiddenNamespaces}
+        onToggleNamespace={toggleNamespace}
+      />
+
+      {/* Main content area */}
+      <div className="flex-1 relative min-w-0">
+          {/* Floating controls — overlaid on graph like topology view */}
+          {(() => {
+            const availableSources = sourcesData?.detected.filter(s => s.status === 'available') || []
+            const activeName = sourcesData?.active
+            const activeSource = availableSources.find(s => s.name === activeName) || availableSources[0]
+
+            const handleSwitchSource = (name: string) => {
+              if (name === activeSource?.name) { setSourcePickerOpen(false); return }
+              setSourcePickerOpen(false)
+              setIsConnecting(true)
+              setConnectionError(null)
+              hasAutoConnectedRef.current = true
+              setSourceMutation.mutate(name, {
+                onSuccess: () => {
+                  queryClient.invalidateQueries({ queryKey: ['traffic-sources'] })
+                  connectMutation.mutate(undefined, {
+                    onSuccess: (data) => {
+                      setIsConnecting(false)
+                      if (!data.connected && data.error) setConnectionError(data.error)
+                      queryClient.invalidateQueries({ queryKey: ['traffic-flows'] })
+                    },
+                    onError: (error) => { setIsConnecting(false); setConnectionError(error.message) },
+                  })
+                },
+                onError: (error) => { setIsConnecting(false); setConnectionError(error.message) },
+              })
+            }
+
+            return (
+              <>
+                {/* Top-left: source status pill */}
+                <div className="absolute top-3 left-3 z-10 flex items-center gap-2">
+                  {activeSource && (
+                    <div className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-theme-surface/90 backdrop-blur border border-theme-border text-[11px]">
+                      {isConnecting ? (
+                        <>
+                          <Loader2 className="h-3 w-3 animate-spin text-blue-400" />
+                          <span className="text-blue-400">Connecting...</span>
+                        </>
+                      ) : connectionError ? (
+                        <>
+                          <span className="w-2 h-2 rounded-full bg-yellow-500" />
+                          <span className="text-theme-text-secondary">{activeSource.name}</span>
+                          <button onClick={handleConnect} className="text-yellow-500 hover:text-yellow-400 font-medium">retry</button>
+                        </>
+                      ) : (
+                        <>
+                          <span className="w-2 h-2 rounded-full bg-green-500" />
+                          {availableSources.length > 1 ? (
+                            <div className="relative" ref={sourcePickerRef}>
+                              <button onClick={() => setSourcePickerOpen(!sourcePickerOpen)} className="flex items-center gap-1 text-theme-text-secondary hover:text-theme-text-primary">
+                                {activeSource.name} <ChevronDown className="h-3 w-3" />
+                              </button>
+                              {sourcePickerOpen && (
+                                <div className="absolute top-full left-0 mt-1 z-50 bg-theme-surface border border-theme-border rounded-md shadow-lg py-1 min-w-[120px]">
+                                  {availableSources.map(source => (
+                                    <button key={source.name} onClick={() => handleSwitchSource(source.name)}
+                                      className={clsx('w-full text-left px-3 py-1 text-xs hover:bg-theme-hover capitalize', source.name === activeSource.name && 'text-blue-400')}>
+                                      {source.name}
+                                    </button>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          ) : (
+                            <span className="text-theme-text-secondary">{activeSource.name}</span>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {/* Top-right: stats + actions */}
+                <div className="absolute top-3 right-3 z-10 flex items-center gap-2">
+                  {flowsData?.flows && flowsData.flows.length > 0 && (
+                    <button onClick={openFlowListDock}
+                      className="flex items-center gap-1 px-2 py-1 text-[10px] rounded-lg bg-theme-surface/90 backdrop-blur border border-theme-border text-theme-text-secondary hover:text-theme-text-primary transition-colors"
+                      title="Open flow list in dock">
+                      <List className="w-3 h-3" /> Flows
+                    </button>
+                  )}
+                  <div className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-theme-surface/90 backdrop-blur border border-theme-border text-[10px] text-theme-text-tertiary">
+                    {flowStats.shown}/{flowStats.total}
+                    <button onClick={refetchFlows} disabled={flowsLoading || isRefreshAnimating}
+                      className={clsx('p-0.5 rounded hover:text-theme-text-primary transition-colors', (flowsLoading || isRefreshAnimating) && 'opacity-50')}>
+                      {flowsLoading ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className={clsx('h-3 w-3', isRefreshAnimating && 'animate-spin')} />}
+                    </button>
+                  </div>
+                </div>
+              </>
+            )
+          })()}
+
+          {isConnecting || (flowsFetching && finalFlows.length === 0) ? (
+            <PaneLoader
+              label={isConnecting ? 'Connecting to traffic source…' : 'Loading traffic data…'}
+              className="absolute inset-0"
+            />
+          ) : finalFlows.length > 0 ? (
+            <TrafficGraph
+              flows={finalFlows}
+              hotPathThreshold={hotPathThreshold}
+              showNamespaceGroups={showNamespaceGroups}
+              serviceCategories={serviceCategories}
+              addonMode={addonMode}
+              trafficSource={sourcesData?.active || ''}
+              onSelectionChange={setGraphSelection}
+            />
+          ) : connectionError ? (
+            <div className="absolute inset-0 flex items-center justify-center">
+              <div className="text-center space-y-3">
+                <Plug className="h-12 w-12 text-yellow-500 mx-auto" />
+                <p className="text-theme-text-secondary">Connection failed</p>
+                <p className="text-xs text-theme-text-tertiary max-w-md">
+                  {connectionError}
+                </p>
+                <button
+                  onClick={handleConnect}
+                  className="px-3 py-1.5 text-sm btn-brand rounded"
+                >
+                  Retry Connection
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="absolute inset-0 flex items-center justify-center px-4">
+              {flowStats.total > 0 && flowStats.shown === 0 ? (
+                <EmptyState
+                  tone="filtered"
+                  variant="card"
+                  icon={Filter}
+                  headline="All traffic is filtered out"
+                  body={`${flowStats.total} ${flowStats.total === 1 ? 'flow' : 'flows'} hidden by current filters.`}
+                  action={
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setHideSystem(false)
+                        setHideExternal(false)
+                        setMinConnections(0)
+                      }}
+                      className="badge badge-sm border border-theme-border bg-theme-elevated text-theme-text-primary hover:bg-theme-hover transition-colors"
+                    >
+                      Show all
+                    </button>
+                  }
+                  className="max-w-md"
+                />
+              ) : flowsData?.warning ? (
+                <EmptyState
+                  tone="neutral"
+                  variant="card"
+                  icon={AlertTriangle}
+                  headline="Unable to fetch traffic data"
+                  body={flowsData.warning}
+                  className="max-w-md"
+                />
+              ) : (
+                <EmptyState
+                  tone="neutral"
+                  variant="card"
+                  icon={Activity}
+                  headline={
+                    sourcesData?.active
+                      ? `Observing via ${sourcesData.active} — no traffic yet`
+                      : 'No traffic observed yet'
+                  }
+                  body="Traffic will appear here once services start communicating."
+                  className="max-w-md"
+                />
+              )}
+            </div>
+          )}
+      </div>
+    </div>
+    </TrafficFlowListProvider>
+  )
+}

@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./scripts/visual-test-start.sh)",
+      "Bash(./scripts/visual-test-start.sh:*)",
+      "Bash(./scripts/visual-test-stop.sh)"
+    ]
+  }
+}

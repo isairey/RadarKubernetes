@@ -1,0 +1,27 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "paths": {
+      "@/*": ["./src/*"],
+      "@skyhook-io/k8s-ui": ["../packages/k8s-ui/src/index.ts"],
+      "@skyhook-io/k8s-ui/*": ["../packages/k8s-ui/src/*"]
+    }
+  },
+  "include": ["src", "../packages/k8s-ui/src"],
+  "exclude": ["../packages/k8s-ui/src/**/*.test.ts", "../packages/k8s-ui/src/**/*.test.tsx"],
+  "references": [{ "path": "./tsconfig.node.json" }]
+}

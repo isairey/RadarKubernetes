@@ -1,0 +1,362 @@
+{{- if .Values.rbac.create -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "radar.fullname" . }}
+  labels:
+    {{- include "radar.labels" . | nindent 4 }}
+rules:
+  # Core resources (read-only)
+  - apiGroups: [""]
+    resources:
+      - pods
+      - services
+      - configmaps
+      - events
+      - namespaces
+      - nodes
+      - persistentvolumeclaims
+      - serviceaccounts
+      - endpoints
+      - limitranges
+    verbs: ["get", "list", "watch"]
+  - apiGroups:
+      - policy
+    resources:
+      - poddisruptionbudgets
+    verbs: ["get", "list", "watch"]
+
+  {{- if .Values.rbac.helm }}
+  # Helm write operations require broad permissions because charts can create
+  # any Kubernetes resource type. Read access for common resources is granted
+  # by other rules in this ClusterRole. Secrets read access is auto-enabled below.
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["create", "update", "patch", "delete"]
+  {{- end }}
+
+  {{- if or .Values.rbac.secrets .Values.rbac.helm (ne .Values.auth.mode "none") .Values.cloud.enabled }}
+  # Secrets access - required for Helm release storage (rbac.helm),
+  # showing secrets in the resource browser (rbac.secrets),
+  # or Helm visibility when auth is enabled / cloud-mode (Helm reads use the
+  # ServiceAccount since users with the K8s 'view' role cannot list secrets)
+  - apiGroups: [""]
+    resources:
+      - secrets
+    verbs: ["get", "list", "watch"]
+  {{- end }}
+
+  # Workload resources (read-only)
+  - apiGroups: ["apps"]
+    resources:
+      - deployments
+      - daemonsets
+      - statefulsets
+      - replicasets
+    verbs: ["get", "list", "watch"]
+
+  # Networking resources (read-only)
+  - apiGroups: ["networking.k8s.io"]
+    resources:
+      - ingresses
+      - networkpolicies
+    verbs: ["get", "list", "watch"]
+
+  # Batch resources (read-only)
+  - apiGroups: ["batch"]
+    resources:
+      - jobs
+      - cronjobs
+    verbs: ["get", "list", "watch"]
+
+  # Autoscaling resources (read-only)
+  - apiGroups: ["autoscaling"]
+    resources:
+      - horizontalpodautoscalers
+    verbs: ["get", "list", "watch"]
+
+  # Authorization (required for capability detection via SelfSubjectAccessReview)
+  - apiGroups: ["authorization.k8s.io"]
+    resources:
+      - selfsubjectaccessreviews
+    verbs: ["create"]
+
+  {{- if .Values.rbac.viewRBAC }}
+  # RBAC objects: opt-in read for the resource browser. Off by default —
+  # cache-served reads are not gated by per-user RBAC, so granting this
+  # exposes the cluster's authorization graph to anyone who can reach
+  # Radar's API regardless of their own permissions.
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources:
+      - roles
+      - rolebindings
+      - clusterroles
+      - clusterrolebindings
+    verbs: ["get", "list", "watch"]
+  {{- end }}
+
+  {{- if .Values.rbac.podLogs }}
+  # Pod logs (opt-in - enables log viewer)
+  - apiGroups: [""]
+    resources:
+      - pods/log
+    verbs: ["get"]
+  {{- end }}
+
+  {{- if .Values.rbac.podExec }}
+  # Pod exec (opt-in - enables terminal feature)
+  - apiGroups: [""]
+    resources:
+      - pods/exec
+    verbs: ["create"]
+  {{- end }}
+
+  {{- if .Values.rbac.portForward }}
+  # Port forwarding (opt-in - enables port forward feature)
+  - apiGroups: [""]
+    resources:
+      - pods/portforward
+    verbs: ["create"]
+  {{- end }}
+
+  {{- if .Values.rbac.traffic }}
+  # Traffic visibility (Hubble/Cilium) - scoped to only the TLS cert secret
+  - apiGroups: [""]
+    resources:
+      - secrets
+    resourceNames:
+      - hubble-relay-client-certs
+    verbs: ["get"]
+  {{- end }}
+
+  {{- if .Values.rbac.metrics }}
+  # Metrics (CPU/memory utilization) from metrics-server via the
+  # metrics.k8s.io aggregated API. Read-only.
+  - apiGroups: ["metrics.k8s.io"]
+    resources:
+      - pods
+      - nodes
+    verbs: ["get", "list"]
+  {{- end }}
+
+  # CRD discovery
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources:
+      - customresourcedefinitions
+    verbs: ["get", "list", "watch"]
+
+  # CRD access
+  {{- if .Values.rbac.crdGroups.all }}
+  # Wildcard access to all CRDs (rbac.crdGroups.all=true)
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  {{- else }}
+  # Per-group CRD access
+  {{- if .Values.rbac.crdGroups.argo }}
+  - apiGroups: ["argoproj.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  {{- end }}
+  {{- if .Values.rbac.crdGroups.awx }}
+  - apiGroups: ["awx.ansible.com"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  {{- end }}
+  {{- if .Values.rbac.crdGroups.certManager }}
+  - apiGroups: ["cert-manager.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  {{- end }}
+  {{- if .Values.rbac.crdGroups.cloudnativePg }}
+  - apiGroups: ["cloudnative-pg.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  {{- end }}
+  {{- if .Values.rbac.crdGroups.clusterApi }}
+  - apiGroups:
+      - "cluster.x-k8s.io"
+      - "infrastructure.cluster.x-k8s.io"
+      - "controlplane.cluster.x-k8s.io"
+      - "bootstrap.cluster.x-k8s.io"
+      - "addons.cluster.x-k8s.io"
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  {{- end }}
+  {{- if .Values.rbac.crdGroups.contour }}
+  - apiGroups: ["projectcontour.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  {{- end }}
+  {{- if .Values.rbac.crdGroups.crossplane }}
+  - apiGroups: ["crossplane.io", "pkg.crossplane.io", "apiextensions.crossplane.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  {{- end }}
+  {{- if .Values.rbac.crdGroups.descheduler }}
+  - apiGroups: ["descheduler.alpha.kubernetes.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  {{- end }}
+  {{- if .Values.rbac.crdGroups.envoyGateway }}
+  - apiGroups: ["gateway.envoyproxy.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  {{- end }}
+  {{- if .Values.rbac.crdGroups.externalDns }}
+  - apiGroups: ["externaldns.k8s.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  {{- end }}
+  {{- if .Values.rbac.crdGroups.externalSecrets }}
+  - apiGroups: ["external-secrets.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  {{- end }}
+  {{- if .Values.rbac.crdGroups.flux }}
+  - apiGroups: ["source.toolkit.fluxcd.io", "kustomize.toolkit.fluxcd.io", "helm.toolkit.fluxcd.io", "notification.toolkit.fluxcd.io", "image.toolkit.fluxcd.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  {{- end }}
+  {{- if .Values.rbac.crdGroups.gatewayApi }}
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  {{- end }}
+  {{- if .Values.rbac.crdGroups.gcpMonitoring }}
+  - apiGroups: ["monitoring.googleapis.com"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  {{- end }}
+  {{- if .Values.rbac.crdGroups.grafana }}
+  - apiGroups: ["monitoring.grafana.com", "tempo.grafana.com", "loki.grafana.com", "grafana.integreatly.org"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  {{- end }}
+  {{- if .Values.rbac.crdGroups.istio }}
+  - apiGroups: ["networking.istio.io", "security.istio.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  {{- end }}
+  {{- if .Values.rbac.crdGroups.karpenter }}
+  - apiGroups: ["karpenter.sh", "karpenter.k8s.aws", "karpenter.azure.com", "karpenter.gcp.compute.com"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  {{- end }}
+  {{- if .Values.rbac.crdGroups.keda }}
+  - apiGroups: ["keda.sh"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  {{- end }}
+  {{- if .Values.rbac.crdGroups.knative }}
+  - apiGroups: ["serving.knative.dev", "eventing.knative.dev", "sources.knative.dev", "messaging.knative.dev", "flows.knative.dev", "networking.internal.knative.dev"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  {{- end }}
+  {{- if .Values.rbac.crdGroups.kubeshark }}
+  - apiGroups: ["kubeshark.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  {{- end }}
+  {{- if .Values.rbac.crdGroups.kured }}
+  - apiGroups: ["kured.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  {{- end }}
+  {{- if .Values.rbac.crdGroups.kyverno }}
+  - apiGroups: ["kyverno.io", "wgpolicyk8s.io", "reports.kyverno.io", "openreports.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  {{- end }}
+  {{- if .Values.rbac.crdGroups.mariadb }}
+  - apiGroups: ["mariadb.mmontes.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  {{- end }}
+  {{- if .Values.rbac.crdGroups.nginx }}
+  - apiGroups: ["nginx.org"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  {{- end }}
+  {{- if .Values.rbac.crdGroups.openshift }}
+  - apiGroups: ["observability.openshift.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  {{- end }}
+  {{- if .Values.rbac.crdGroups.opentelemetry }}
+  - apiGroups: ["opentelemetry.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  {{- end }}
+  {{- if .Values.rbac.crdGroups.prometheus }}
+  - apiGroups: ["monitoring.coreos.com"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  {{- end }}
+  {{- if .Values.rbac.crdGroups.reflector }}
+  - apiGroups: ["reflector.v1.k8s.emberstack.com"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  {{- end }}
+  {{- if .Values.rbac.crdGroups.reloader }}
+  - apiGroups: ["reloader.stakater.com"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  {{- end }}
+  {{- if .Values.rbac.crdGroups.sealedSecrets }}
+  - apiGroups: ["sealed-secrets.bitnami.com"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  {{- end }}
+  {{- if .Values.rbac.crdGroups.strimzi }}
+  - apiGroups: ["strimzi.io", "kafka.strimzi.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  {{- end }}
+  {{- if .Values.rbac.crdGroups.tekton }}
+  - apiGroups: ["tekton.dev"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  {{- end }}
+  {{- if .Values.rbac.crdGroups.traefik }}
+  - apiGroups: ["traefik.io", "traefik.containo.us"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  {{- end }}
+  {{- if .Values.rbac.crdGroups.trivy }}
+  - apiGroups: ["aquasecurity.github.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  {{- end }}
+  {{- if .Values.rbac.crdGroups.velero }}
+  - apiGroups: ["velero.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  {{- end }}
+  {{- end }}
+
+  {{- with .Values.rbac.additionalCrdGroups }}
+  # Additional CRD groups from additionalCrdGroups
+  - apiGroups:
+    {{- toYaml . | nindent 6 }}
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  {{- end }}
+
+  {{- if or (ne .Values.auth.mode "none") .Values.cloud.enabled }}
+  # Auth: Impersonation permissions for user-scoped operations.
+  # Required under cloud-mode too — the binary forces --auth-mode=proxy there
+  # and impersonates Cloud-injected identities to the K8s API.
+  - apiGroups: [""]
+    resources: ["users", "groups"]
+    verbs: ["impersonate"]
+  # Auth: SubjectAccessReview for per-user permission checks
+  - apiGroups: ["authorization.k8s.io"]
+    resources: ["subjectaccessreviews"]
+    verbs: ["create"]
+  {{- end }}
+
+  {{- with .Values.rbac.additionalRules }}
+  {{- toYaml . | nindent 2 }}
+  {{- end }}
+{{- end }}

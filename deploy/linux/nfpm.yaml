@@ -1,0 +1,25 @@
+name: radar-desktop
+arch: amd64
+platform: linux
+version: ${VERSION}
+maintainer: Skyhook <support@skyhook.io>
+description: "Kubernetes visibility — topology, traffic, and Helm management"
+vendor: Skyhook
+homepage: https://github.com/skyhook-io/radar
+license: Apache-2.0
+contents:
+  - src: build/bin/radar-desktop
+    dst: /usr/bin/radar-desktop
+  - src: deploy/linux/radar-desktop.desktop
+    dst: /usr/share/applications/radar-desktop.desktop
+  - src: build/appicon.png
+    dst: /usr/share/icons/hicolor/512x512/apps/radar-desktop.png
+overrides:
+  deb:
+    depends:
+      - libgtk-3-0
+      - libwebkit2gtk-4.1-0
+  rpm:
+    depends:
+      - gtk3
+      - webkit2gtk4.1

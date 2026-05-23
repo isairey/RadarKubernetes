@@ -1,0 +1,175 @@
+# GoReleaser configuration for Radar
+# Documentation: https://goreleaser.com
+
+version: 2
+
+before:
+  hooks:
+    # Build frontend before Go compilation (gets embedded)
+    - sh -c "cd web && npm install && npm run build"
+    # Clean stale files from previous builds before copying fresh output
+    - sh -c "rm -rf internal/static/dist && mkdir -p internal/static/dist"
+    - sh -c "cp -r web/dist/* internal/static/dist/"
+
+builds:
+  - id: radar
+    main: ./cmd/explorer
+    binary: kubectl-radar
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+    ignore:
+      - goos: windows
+        goarch: arm64
+
+archives:
+  - id: default
+    formats:
+      - tar.gz
+    name_template: >-
+      {{ .ProjectName }}_v{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    files:
+      - LICENSE*
+      - README*
+
+checksum:
+  name_template: 'checksums.txt'
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+      - Merge pull request
+      - Merge branch
+
+release:
+  github:
+    owner: skyhook-io
+    name: radar
+  draft: false
+  prerelease: auto
+  name_template: "v{{.Version}}"
+  header: |
+    ## Radar v{{.Version}}
+
+    **Modern Kubernetes visibility.** Local-first. No account. No cloud dependency. Fast.
+
+    Topology, event timeline, and service traffic — plus resource browsing and Helm management. Open source. Free forever.
+
+    ### Installation
+
+    **Homebrew (macOS/Linux):**
+    ```bash
+    brew install skyhook-io/tap/radar
+    ```
+
+    **Scoop (Windows):**
+    ```powershell
+    scoop bucket add skyhook https://github.com/skyhook-io/scoop-bucket
+    scoop install radar
+    ```
+
+    **PowerShell (Windows):**
+    ```powershell
+    irm https://raw.githubusercontent.com/skyhook-io/radar/main/install.ps1 | iex
+    ```
+
+    **Manual (macOS Apple Silicon):**
+    ```bash
+    curl -LO https://github.com/skyhook-io/radar/releases/download/v{{.Version}}/radar_v{{.Version}}_darwin_arm64.tar.gz
+    tar -xzf radar_v{{.Version}}_darwin_arm64.tar.gz
+    sudo mv kubectl-radar /usr/local/bin/
+    ```
+
+    **Manual (macOS Intel):**
+    ```bash
+    curl -LO https://github.com/skyhook-io/radar/releases/download/v{{.Version}}/radar_v{{.Version}}_darwin_amd64.tar.gz
+    tar -xzf radar_v{{.Version}}_darwin_amd64.tar.gz
+    sudo mv kubectl-radar /usr/local/bin/
+    ```
+
+    **Manual (Linux amd64):**
+    ```bash
+    curl -LO https://github.com/skyhook-io/radar/releases/download/v{{.Version}}/radar_v{{.Version}}_linux_amd64.tar.gz
+    tar -xzf radar_v{{.Version}}_linux_amd64.tar.gz
+    sudo mv kubectl-radar /usr/local/bin/
+    ```
+
+    ### Desktop App
+
+    **Homebrew (macOS):**
+    ```bash
+    brew install --cask skyhook-io/tap/radar-desktop
+    ```
+
+    **Debian/Ubuntu:**
+    ```bash
+    curl -LO https://github.com/skyhook-io/radar/releases/download/v{{.Version}}/radar-desktop_v{{.Version}}_linux_amd64.deb
+    sudo dpkg -i radar-desktop_v{{.Version}}_linux_amd64.deb
+    ```
+
+    **Fedora/RHEL:**
+    ```bash
+    curl -LO https://github.com/skyhook-io/radar/releases/download/v{{.Version}}/radar-desktop_v{{.Version}}_linux_amd64.rpm
+    sudo rpm -i radar-desktop_v{{.Version}}_linux_amd64.rpm
+    ```
+
+    **Scoop (Windows):**
+    ```powershell
+    scoop bucket add skyhook https://github.com/skyhook-io/scoop-bucket
+    scoop install radar-desktop
+    ```
+
+    **Windows (direct download):** Download from the assets below.
+
+    ### CLI
+
+    Then run: `kubectl radar`
+
+# Homebrew formula (publishes to skyhook-io/homebrew-tap)
+brews:
+  - name: radar
+    repository:
+      owner: skyhook-io
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Formula
+    homepage: "https://github.com/skyhook-io/radar"
+    description: "Modern Kubernetes visibility — topology, traffic, and Helm management"
+    license: "Apache-2.0"
+    install: |
+      bin.install "kubectl-radar"
+      bin.install_symlink "kubectl-radar" => "radar"
+    test: |
+      system "#{bin}/kubectl-radar", "--version"
+
+# Scoop manifest (publishes to skyhook-io/scoop-bucket)
+scoops:
+  - name: radar
+    repository:
+      owner: skyhook-io
+      name: scoop-bucket
+      token: "{{ .Env.SCOOP_BUCKET_TOKEN }}"
+    homepage: "https://github.com/skyhook-io/radar"
+    description: "Modern Kubernetes visibility — topology, traffic, and Helm management"
+    license: Apache-2.0
+    post_install: ["Write-Host 'Run: kubectl-radar or radar' -ForegroundColor Green"]

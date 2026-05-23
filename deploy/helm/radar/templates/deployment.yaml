@@ -1,0 +1,215 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "radar.fullname" . }}
+  labels:
+    {{- include "radar.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  {{- if and .Values.persistence.enabled (eq .Values.timeline.storage "sqlite") }}
+  strategy:
+    type: Recreate
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "radar.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "radar.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "radar.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: {{ .Chart.Name }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --port={{ .Values.service.port }}
+            - --no-browser
+            - --timeline-storage={{ .Values.timeline.storage }}
+            {{- if eq .Values.timeline.storage "sqlite" }}
+            - --timeline-db={{ .Values.timeline.dbPath }}
+            {{- end }}
+            - --history-limit={{ .Values.timeline.historyLimit }}
+            {{- if .Values.traffic.prometheusUrl }}
+            - --prometheus-url={{ .Values.traffic.prometheusUrl }}
+            {{- end }}
+            {{- if not .Values.mcp.enabled }}
+            - --no-mcp
+            {{- end }}
+            {{- if ne .Values.auth.mode "none" }}
+            - --auth-mode={{ .Values.auth.mode }}
+            - --auth-cookie-ttl={{ .Values.auth.cookieTTL }}
+            {{- if .Values.auth.proxy.userHeader }}
+            - --auth-user-header={{ .Values.auth.proxy.userHeader }}
+            {{- end }}
+            {{- if .Values.auth.proxy.groupsHeader }}
+            - --auth-groups-header={{ .Values.auth.proxy.groupsHeader }}
+            {{- end }}
+            {{- if .Values.auth.oidc.issuerURL }}
+            - --auth-oidc-issuer={{ .Values.auth.oidc.issuerURL }}
+            {{- end }}
+            {{- if .Values.auth.oidc.clientID }}
+            - --auth-oidc-client-id={{ .Values.auth.oidc.clientID }}
+            {{- end }}
+            {{- /* clientSecret is injected via RADAR_OIDC_CLIENT_SECRET env var below */}}
+            {{- if .Values.auth.oidc.redirectURL }}
+            - --auth-oidc-redirect-url={{ .Values.auth.oidc.redirectURL }}
+            {{- end }}
+            {{- if .Values.auth.oidc.groupsClaim }}
+            - --auth-oidc-groups-claim={{ .Values.auth.oidc.groupsClaim }}
+            {{- end }}
+            {{- if .Values.auth.oidc.postLogoutRedirectURL }}
+            - --auth-oidc-post-logout-redirect-url={{ .Values.auth.oidc.postLogoutRedirectURL }}
+            {{- end }}
+            {{- if .Values.auth.oidc.usernamePrefix }}
+            - --auth-oidc-username-prefix={{ .Values.auth.oidc.usernamePrefix }}
+            {{- end }}
+            {{- if .Values.auth.oidc.groupsPrefix }}
+            - --auth-oidc-groups-prefix={{ .Values.auth.oidc.groupsPrefix }}
+            {{- end }}
+            {{- if .Values.auth.oidc.caCert }}
+            - --auth-oidc-ca-cert={{ .Values.auth.oidc.caCert }}
+            {{- end }}
+            {{- if .Values.auth.oidc.insecureSkipVerify }}
+            - --auth-oidc-insecure-skip-verify
+            {{- end }}
+            {{- if .Values.auth.oidc.backchannelLogout }}
+            - --auth-oidc-backchannel-logout
+            {{- end }}
+            {{- end }}
+            {{- if .Values.cloud.enabled }}
+            {{- if not (or .Values.cloud.token .Values.cloud.existingSecret) }}
+            {{- fail "cloud.token or cloud.existingSecret must be set when cloud.enabled=true" }}
+            {{- end }}
+            - --cloud-url={{ required "cloud.url is required when cloud.enabled=true" .Values.cloud.url }}
+            - --cluster-name={{ required "cloud.clusterName is required when cloud.enabled=true" .Values.cloud.clusterName }}
+            {{- /* cloud.token is injected via RADAR_CLOUD_TOKEN env var below, not the command line */}}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+          env:
+            {{- if and (ne .Values.auth.mode "none") (or .Values.auth.secret .Values.auth.existingSecret) }}
+            - name: RADAR_AUTH_SECRET
+              {{- if .Values.auth.existingSecret }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.existingSecret }}
+                  key: {{ .Values.auth.existingSecretKey }}
+              {{- else }}
+              value: {{ .Values.auth.secret | quote }}
+              {{- end }}
+            {{- end }}
+            {{- if and (eq .Values.auth.mode "oidc") (or .Values.auth.oidc.clientSecret .Values.auth.oidc.existingSecret) }}
+            - name: RADAR_OIDC_CLIENT_SECRET
+              {{- if .Values.auth.oidc.existingSecret }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.oidc.existingSecret }}
+                  key: {{ .Values.auth.oidc.clientSecretKey }}
+              {{- else }}
+              value: {{ .Values.auth.oidc.clientSecret | quote }}
+              {{- end }}
+            {{- end }}
+            - name: HELM_CACHE_HOME
+              value: "/tmp/helm/cache"
+            - name: HELM_CONFIG_HOME
+              value: "/tmp/helm/config"
+            - name: HELM_DATA_HOME
+              value: "/tmp/helm/data"
+            {{- if .Values.cloud.enabled }}
+            # Signals cloud-mode to the Radar binary: forces --auth-mode=proxy,
+            # accepts forwarded identity headers from the tunnel, disables
+            # startup-config fields that don't apply under hosted Radar Cloud.
+            - name: RADAR_CLOUD_MODE
+              value: "true"
+            {{- if or .Values.cloud.token .Values.cloud.existingSecret }}
+            - name: RADAR_CLOUD_TOKEN
+              {{- if .Values.cloud.existingSecret }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.cloud.existingSecret }}
+                  key: {{ .Values.cloud.existingSecretKey }}
+              {{- else }}
+              value: {{ .Values.cloud.token | quote }}
+              {{- end }}
+            {{- end }}
+            {{- end }}
+            {{- if .Values.rbac.selfUpgrade }}
+            - name: MY_POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: MY_DEPLOYMENT_NAME
+              value: {{ include "radar.fullname" . }}
+            {{- end }}
+            {{- with .Values.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- if .Values.probes.liveness.enabled }}
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+          {{- end }}
+          {{- if .Values.probes.readiness.enabled }}
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: home
+              mountPath: /home/nonroot
+            {{- if and .Values.persistence.enabled (eq .Values.timeline.storage "sqlite") }}
+            - name: data
+              mountPath: /data
+            {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: home
+          emptyDir: {}
+        {{- if and .Values.persistence.enabled (eq .Values.timeline.storage "sqlite") }}
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "radar.fullname" . }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

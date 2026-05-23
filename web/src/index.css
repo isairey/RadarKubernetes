@@ -1,0 +1,293 @@
+@import "tailwindcss";
+/*
+ * Tailwind v4 JIT scans only sources under this CSS file's package (web/).
+ * k8s-ui is a workspace package whose TSX files also use Tailwind classes;
+ * without this @source, any class used *only* in k8s-ui/ (not also in web/)
+ * is silently dropped — e.g. `top-8` in TerminalTab, which collapsed the
+ * terminal to zero height and caused issue #518 (blank terminal).
+ */
+@source "../../packages/k8s-ui/src/**/*.{ts,tsx}";
+@variant dark (&:where(.dark, .dark *));
+@import "@skyhook-io/k8s-ui/theme/variables.css";
+@import "@skyhook-io/k8s-ui/theme/tailwind-theme.css";
+@import "@skyhook-io/k8s-ui/theme/components.css";
+@import "@skyhook-io/k8s-ui/topology.css";
+@import "@fontsource-variable/dm-sans";
+@import "@fontsource/dm-mono";
+
+/*
+ * Tailwind v4 theme tokens. Migrated from the legacy v3 tailwind.config.js
+ * to CSS-first @theme so library consumers (e.g. radar-hub-web) don't need
+ * to pick up radar's Node config or its `@tailwindcss/typography` plugin
+ * when they consume this package from npm.
+ */
+@theme {
+  /* Fonts — DM Sans for UI, DM Mono for code/metric panes. */
+  --font-sans: "DM Sans Variable", "DM Sans", system-ui, sans-serif;
+  --font-mono: "DM Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* Breakpoints — desktop-first K8s UI; tighter than Tailwind defaults. */
+  --breakpoint-sm: 900px;
+  --breakpoint-md: 1100px;
+  --breakpoint-lg: 1280px;
+  --breakpoint-xl: 1536px;
+
+  /* Shadows (mapped to the --shadow-* CSS vars from k8s-ui/theme). */
+  --shadow-theme-sm: var(--shadow-sm);
+  --shadow-theme-md: var(--shadow-md);
+  --shadow-theme-lg: var(--shadow-lg);
+  --shadow-glow-brand-sm: var(--glow-brand-sm);
+  --shadow-glow-brand-md: var(--glow-brand-md);
+  --shadow-drawer: var(--shadow-drawer);
+
+  /* Ring (focus outline) color — follow the accent CSS var. */
+  --color-accent: var(--accent);
+
+  /* Border radius — rounder than Tailwind defaults to match the brand. */
+  --radius: 0.375rem;    /* default (was 0.25rem) */
+  --radius-md: 0.5rem;   /* was 0.375rem */
+  --radius-lg: 0.625rem; /* was 0.5rem */
+  --radius-xl: 0.875rem; /* was 0.75rem */
+
+  /* Custom transient toast animation used in a few spots. */
+  --animate-fade-in-out: fadeInOut 2s ease-in-out forwards;
+}
+
+@keyframes fadeInOut {
+  0%, 100% { opacity: 0; transform: translateY(-8px); }
+  15%, 85% { opacity: 1; transform: translateY(0); }
+}
+
+/* Global: pointer cursor for all interactive elements */
+button, [role="button"], a, label, select, summary, [tabindex]:not([tabindex="-1"]) {
+  cursor: pointer;
+}
+
+/* ============================================
+   BASE STYLES
+   ============================================ */
+
+:root {
+  /* Font settings */
+  font-family: 'DM Sans Variable', 'DM Sans', system-ui, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background-color: var(--bg-base);
+  color: var(--text-primary);
+}
+
+#root {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+
+/* ============================================
+   REACT FLOW CUSTOMIZATIONS
+   ============================================ */
+
+.react-flow__pane {
+  cursor: grab;
+}
+
+.react-flow__pane:active {
+  cursor: grabbing;
+}
+
+.react-flow__node {
+  cursor: pointer !important;
+}
+
+.react-flow__node:active {
+  cursor: pointer !important;
+}
+
+/* React Flow Controls */
+.react-flow__controls {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  box-shadow: var(--shadow-md);
+}
+
+.react-flow__controls-button {
+  background: var(--bg-surface);
+  border: none;
+  border-bottom: 1px solid var(--border-default);
+  color: var(--text-tertiary);
+  width: 28px;
+  height: 28px;
+  padding: 5px;
+}
+
+.react-flow__controls-button:hover {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+}
+
+.react-flow__controls-button:last-child {
+  border-bottom: none;
+}
+
+.react-flow__controls-button svg {
+  fill: currentColor;
+}
+
+/* React Flow MiniMap */
+.react-flow__minimap {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+}
+
+.react-flow__minimap-mask {
+  fill: light-dark(rgba(232, 237, 245, 0.8), rgba(12, 16, 28, 0.8));
+}
+
+/* ============================================
+   CUSTOM SCROLLBAR
+   ============================================ */
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--scrollbar-track);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+}
+
+/* ============================================
+   ANIMATIONS
+   ============================================ */
+
+@keyframes slide-in-from-right {
+  from {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+/* Expand animation for timeline swimlane children — GPU-composited (transform + opacity only).
+   Slides down from the parent row with a fade. Collapse is instant (unmount). */
+@keyframes swimlane-expand {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes fade-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+.animate-in {
+  animation: slide-in-from-right 0.2s ease-out;
+}
+
+@keyframes slide-out-to-right {
+  from { transform: translateX(0); opacity: 1; }
+  to { transform: translateX(100%); opacity: 0; }
+}
+
+.animate-out {
+  animation: slide-out-to-right 0.2s ease-in forwards;
+}
+
+/* View Transitions: drawer content cross-fade */
+::view-transition-old(drawer-content),
+::view-transition-old(helm-drawer-content) {
+  animation-duration: 100ms;
+  animation-timing-function: ease-out;
+}
+::view-transition-new(drawer-content),
+::view-transition-new(helm-drawer-content) {
+  animation-duration: 200ms;
+  animation-timing-function: ease-in;
+}
+
+@keyframes fade-in-up {
+  from {
+    opacity: 0;
+    transform: translateY(24px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.animate-fade-in-up {
+  animation: fade-in-up 0.5s ease-out both;
+}
+
+.slide-in-from-right-5 {
+  --tw-enter-translate-x: 1.25rem;
+}
+
+.fade-in {
+  animation: slide-in-from-right 0.2s ease-out;
+}
+
+
+/* ============================================
+   XTERM TERMINAL STYLES
+   ============================================ */
+
+/* Override any potential centering and ensure proper layout */
+.xterm,
+.xterm-viewport,
+.xterm-screen {
+  text-align: left !important;
+  margin: 0 !important;
+}
+
+/* Prevent xterm from growing beyond its container */
+.xterm {
+  position: absolute !important;
+  top: 0 !important;
+  left: 0 !important;
+  right: 0 !important;
+  bottom: 0 !important;
+  overflow: hidden !important;
+}
+
+.xterm-screen canvas {
+  margin: 0 !important;
+}
+
+/* Log search highlight */
+mark.log-highlight {
+  background: light-dark(rgba(180, 120, 0, 0.35), rgba(250, 200, 0, 0.55));
+  color: inherit;
+  border-radius: 2px;
+  padding: 0 1px;
+}

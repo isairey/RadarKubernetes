@@ -1,0 +1,262 @@
+package server
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+
+	"github.com/go-chi/chi/v5"
+	"k8s.io/client-go/kubernetes"
+
+	"github.com/skyhook-io/radar/internal/k8s"
+	"github.com/skyhook-io/radar/pkg/k8score"
+)
+
+// LogsResponse is the response for non-streaming logs
+type LogsResponse struct {
+	PodName    string            `json:"podName"`
+	Namespace  string            `json:"namespace"`
+	Containers []string          `json:"containers"`
+	Logs       map[string]string `json:"logs"` // container -> logs
+}
+
+// handlePodLogs fetches logs from a pod (non-streaming)
+func (s *Server) handlePodLogs(w http.ResponseWriter, r *http.Request) {
+	namespace := chi.URLParam(r, "namespace")
+	podName := chi.URLParam(r, "name")
+	container := r.URL.Query().Get("container")
+	previous := r.URL.Query().Get("previous") == "true"
+	tailLinesStr := r.URL.Query().Get("tailLines")
+	sinceSecondsStr := r.URL.Query().Get("sinceSeconds")
+
+	// Check namespace access for authenticated users
+	if allowed := s.getUserNamespaces(r, []string{namespace}); noNamespaceAccess(allowed) {
+		s.writeError(w, http.StatusForbidden, "no access to namespace "+namespace)
+		return
+	}
+
+	tailLines := parseTailLines(tailLinesStr, 500)
+	sinceSeconds := parseSinceSeconds(sinceSecondsStr)
+
+	client := s.getClientForRequest(r)
+	if client == nil {
+		s.writeError(w, http.StatusServiceUnavailable, "cluster client not available — check cluster connection")
+		return
+	}
+
+	// Get pod to find containers
+	cache := k8s.GetResourceCache()
+	if cache == nil {
+		s.writeError(w, http.StatusServiceUnavailable, "Resource cache not available")
+		return
+	}
+
+	pod, err := cache.Pods().Pods(namespace).Get(podName)
+	if err != nil {
+		s.writeError(w, http.StatusNotFound, fmt.Sprintf("Pod not found: %v", err))
+		return
+	}
+
+	// Get container names
+	var containers []string
+	for _, c := range pod.Spec.Containers {
+		containers = append(containers, c.Name)
+	}
+	for _, c := range pod.Spec.InitContainers {
+		containers = append(containers, c.Name)
+	}
+
+	// Fetch logs
+	logs := make(map[string]string)
+
+	if container != "" {
+		// Fetch logs for specific container
+		logContent, err := s.fetchContainerLogs(r.Context(), client, namespace, podName, container, tailLines, previous, sinceSeconds)
+		if err != nil {
+			s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to fetch logs: %v", err))
+			return
+		}
+		logs[container] = logContent
+	} else {
+		// Fetch logs for all containers
+		for _, c := range containers {
+			logContent, err := s.fetchContainerLogs(r.Context(), client, namespace, podName, c, tailLines, previous, sinceSeconds)
+			if err != nil {
+				logs[c] = fmt.Sprintf("Error fetching logs: %v", err)
+			} else {
+				logs[c] = logContent
+			}
+		}
+	}
+
+	response := LogsResponse{
+		PodName:    podName,
+		Namespace:  namespace,
+		Containers: containers,
+		Logs:       logs,
+	}
+
+	s.writeJSON(w, response)
+}
+
+// handlePodLogsStream streams logs from a pod using SSE
+func (s *Server) handlePodLogsStream(w http.ResponseWriter, r *http.Request) {
+	namespace := chi.URLParam(r, "namespace")
+	podName := chi.URLParam(r, "name")
+	container := r.URL.Query().Get("container")
+	previous := r.URL.Query().Get("previous") == "true"
+	tailLinesStr := r.URL.Query().Get("tailLines")
+
+	// Check namespace access for authenticated users
+	if allowed := s.getUserNamespaces(r, []string{namespace}); noNamespaceAccess(allowed) {
+		s.writeError(w, http.StatusForbidden, "no access to namespace "+namespace)
+		return
+	}
+
+	sinceStr := r.URL.Query().Get("sinceSeconds")
+
+	tailLines := parseTailLines(tailLinesStr, 100)
+	sinceSeconds := parseSinceSeconds(sinceStr)
+
+	// Set SSE headers
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	client := s.getClientForRequest(r)
+	if client == nil {
+		sendSSEError(w, flusher, "cluster client not available — check cluster connection")
+		return
+	}
+
+	// If no container specified, get the first one
+	if container == "" {
+		cache := k8s.GetResourceCache()
+		if cache != nil {
+			pod, err := cache.Pods().Pods(namespace).Get(podName)
+			if err == nil && len(pod.Spec.Containers) > 0 {
+				container = pod.Spec.Containers[0].Name
+			}
+		}
+	}
+
+	stream, err := k8score.GetContainerLogs(r.Context(), client, namespace, podName, container, k8score.LogOptions{
+		TailLines:    &tailLines,
+		SinceSeconds: sinceSeconds,
+		Previous:     previous,
+		Timestamps:   true,
+		Follow:       true,
+	})
+	if err != nil {
+		sendSSEError(w, flusher, fmt.Sprintf("Failed to open log stream: %v", err))
+		return
+	}
+	defer stream.Close()
+
+	// Send initial connection event
+	sendSSEEvent(w, flusher, "connected", map[string]any{
+		"pod":       podName,
+		"namespace": namespace,
+		"container": container,
+	})
+
+	// Stream logs line by line
+	reader := bufio.NewReader(stream)
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		default:
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				if err == io.EOF {
+					// Stream ended (pod terminated or container finished)
+					sendSSEEvent(w, flusher, "end", map[string]string{"reason": "stream ended"})
+					return
+				}
+				// Check if context was cancelled
+				if r.Context().Err() != nil {
+					return
+				}
+				sendSSEError(w, flusher, fmt.Sprintf("Read error: %v", err))
+				return
+			}
+
+			line = strings.TrimSuffix(line, "\n")
+			if line == "" {
+				continue
+			}
+
+			// Parse timestamp and content
+			timestamp, content := parseLogLine(line)
+
+			sendSSEEvent(w, flusher, "log", map[string]string{
+				"timestamp": timestamp,
+				"content":   content,
+				"container": container,
+			})
+		}
+	}
+}
+
+// fetchContainerLogs fetches logs for a specific container. Callers pass
+// the impersonated client so log reads are subject to the user's K8s RBAC.
+func (s *Server) fetchContainerLogs(ctx context.Context, client kubernetes.Interface, namespace, podName, container string, tailLines int64, previous bool, sinceSeconds *int64) (string, error) {
+	if client == nil {
+		return "", fmt.Errorf("cluster client not available")
+	}
+
+	stream, err := k8score.GetContainerLogs(ctx, client, namespace, podName, container, k8score.LogOptions{
+		TailLines:    &tailLines,
+		SinceSeconds: sinceSeconds,
+		Previous:     previous,
+		Timestamps:   true,
+	})
+	if err != nil {
+		return "", err
+	}
+	defer stream.Close()
+
+	content, err := io.ReadAll(stream)
+	if err != nil {
+		return "", err
+	}
+
+	return string(content), nil
+}
+
+// parseLogLine extracts timestamp from a log line (format: 2024-01-20T10:30:00.123456789Z content)
+func parseLogLine(line string) (timestamp, content string) {
+	// K8s timestamps are in RFC3339Nano format at the start of the line
+	if len(line) > 30 && line[4] == '-' && line[7] == '-' && line[10] == 'T' {
+		// Find the space after timestamp
+		spaceIdx := strings.Index(line, " ")
+		if spaceIdx > 20 && spaceIdx < 40 {
+			return line[:spaceIdx], line[spaceIdx+1:]
+		}
+	}
+	return "", line
+}
+
+// sendSSEEvent sends an SSE event
+func sendSSEEvent(w http.ResponseWriter, flusher http.Flusher, event string, data any) {
+	jsonData, _ := json.Marshal(data)
+	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, jsonData)
+	flusher.Flush()
+}
+
+// sendSSEError sends an error event
+func sendSSEError(w http.ResponseWriter, flusher http.Flusher, message string) {
+	sendSSEEvent(w, flusher, "error", map[string]string{"error": message})
+}

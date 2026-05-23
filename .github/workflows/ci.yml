@@ -1,0 +1,116 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  pkg:
+    name: pkg (shared library)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: pkg
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.26'
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Build
+        run: go build ./...
+
+  backend:
+    name: Backend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.26'
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Build
+        run: go build -o explorer ./cmd/explorer
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npm run tsc
+        working-directory: web
+
+      - name: Build
+        run: npm run build
+        working-directory: web
+
+  helm:
+    name: Helm chart
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Helm
+        uses: azure/setup-helm@v5
+
+      - name: Lint
+        run: helm lint deploy/helm/radar
+
+      - name: Render default values
+        run: helm template radar deploy/helm/radar > /dev/null
+
+      - name: Render cloud.enabled with inline token
+        run: |
+          helm template radar deploy/helm/radar \
+            --set cloud.enabled=true \
+            --set cloud.url=wss://cloud.example/agent \
+            --set cloud.clusterName=test \
+            --set cloud.token=rhc_deadbeef > /dev/null
+
+      - name: Render cloud.enabled with existingSecret
+        run: |
+          helm template radar deploy/helm/radar \
+            --set cloud.enabled=true \
+            --set cloud.url=wss://cloud.example/agent \
+            --set cloud.clusterName=test \
+            --set cloud.existingSecret=my-cloud-token > /dev/null
+
+      - name: Reject cloud.enabled without token or existingSecret
+        run: |
+          if helm template radar deploy/helm/radar \
+            --set cloud.enabled=true \
+            --set cloud.url=wss://cloud.example/agent \
+            --set cloud.clusterName=test 2>/dev/null; then
+            echo "ERROR: helm template should have failed with no token set"
+            exit 1
+          fi

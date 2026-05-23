@@ -1,0 +1,40 @@
+# Binaries
+/radar
+/radar-desktop
+/explorer
+/desktop
+*.exe
+
+# Go
+vendor/
+
+# Node
+node_modules/
+web/node_modules/
+web/dist/
+packages/*/node_modules/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+*.log
+internal/static/dist/*
+!internal/static/dist/.gitkeep
+/build/bin/
+
+# Wails generated
+web/wailsjs/
+web/package.json.md5
+
+# Local config
+.env
+.env.local
+dist/

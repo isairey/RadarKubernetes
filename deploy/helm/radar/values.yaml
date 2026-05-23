@@ -1,0 +1,323 @@
+# Default values for radar.
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/skyhook-io/radar
+  pullPolicy: IfNotPresent
+  # Overrides the image tag whose default is the chart appVersion.
+  tag: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  # Specifies whether a service account should be created
+  create: true
+  # Annotations to add to the service account
+  annotations: {}
+  # The name of the service account to use.
+  # If not set and create is true, a name is generated using the fullname template
+  name: ""
+
+# RBAC configuration
+rbac:
+  # Create ClusterRole and ClusterRoleBinding
+  create: true
+  # Additional rules to add to the ClusterRole
+  additionalRules: []
+
+  # Privileged permissions (disabled by default for security)
+  # Enable these based on features you need:
+
+  # Allow Helm write operations (install, upgrade, rollback, uninstall, apply values)
+  # Requires broad permissions - grants create/update/patch/delete on all resource types,
+  # since Helm charts can create any kind of Kubernetes resource.
+  # Automatically enables secrets read access (needed for Helm release storage).
+  helm: false
+
+  # Allow reading secrets (shows secrets in resource list)
+  secrets: false
+
+  # Allow reading RBAC objects (Roles, RoleBindings, ClusterRoles, ClusterRoleBindings)
+  # so the resource browser can list them. Off by default: anyone reaching Radar's
+  # API sees the full RBAC graph through the shared informer cache regardless of
+  # their own K8s permissions, which is reconnaissance value for a low-trust user.
+  # Enable for clusters where Radar's audience is trusted with cluster RBAC visibility.
+  viewRBAC: false
+
+  # Allow pod exec (enables terminal feature)
+  podExec: false
+
+  # Allow pod logs (enables log viewer)
+  # This is relatively safe - only reads logs, no write access
+  podLogs: true
+
+  # Allow port forwarding (enables port forward feature)
+  portForward: false
+
+  # Allow Radar Cloud to trigger one-click in-app upgrades without customers
+  # needing a terminal or cloud credentials. Not needed for standalone/local
+  # installs — those have direct kubectl/Helm access anyway.
+  # Security scope: namespace-scoped Role (not ClusterRole), restricted to this
+  # Deployment only via resourceNames, get+patch verbs only (no delete/create).
+  # The endpoint validates that the requested image comes from
+  # ghcr.io/skyhook-io/radar before issuing any patch.
+  selfUpgrade: false
+
+  # Traffic visibility (Hubble/Cilium integration)
+  # Grants read access ONLY to hubble-relay-client-certs secret for TLS auth
+  traffic: true
+
+  # Metrics (pods/nodes) from metrics-server (metrics.k8s.io API).
+  # Enables CPU/memory utilization widgets on the dashboard and per-resource
+  # metrics panels. Safe to enable — read-only on the aggregated metrics API.
+  metrics: true
+
+  # CRD access - all common groups enabled by default
+  # Granting RBAC for CRDs that don't exist has no effect.
+  crdGroups:
+    # Set to true to grant read access to ALL CRDs (overrides individual settings below)
+    # Simpler but broader permissions - some orgs may not allow this
+    all: false
+
+    argo: true              # argoproj.io
+    awx: true               # awx.ansible.com
+    certManager: true       # cert-manager.io
+    cloudnativePg: true     # cloudnative-pg.io
+    clusterApi: true        # *.cluster.x-k8s.io (CAPI core + infrastructure / controlplane / bootstrap / addons)
+    contour: true           # projectcontour.io
+    crossplane: true        # crossplane.io, pkg.crossplane.io
+    descheduler: true       # descheduler.alpha.kubernetes.io
+    envoyGateway: true      # gateway.envoyproxy.io
+    externalDns: true       # externaldns.k8s.io
+    externalSecrets: true   # external-secrets.io
+    flux: true              # *.toolkit.fluxcd.io
+    gatewayApi: true        # gateway.networking.k8s.io
+    gcpMonitoring: true     # monitoring.googleapis.com
+    grafana: true           # monitoring.grafana.com, tempo/loki/grafana.integreatly.org
+    istio: true             # networking.istio.io, security.istio.io
+    karpenter: true         # karpenter.sh, karpenter.k8s.aws, karpenter.azure.com, karpenter.gcp.compute.com
+    keda: true              # keda.sh
+    knative: true           # serving.knative.dev, eventing.knative.dev, sources/messaging/flows/networking.internal.knative.dev
+    kubeshark: true         # kubeshark.io
+    kured: true             # kured.io
+    kyverno: true           # kyverno.io, wgpolicyk8s.io, reports.kyverno.io
+    mariadb: true           # mariadb.mmontes.io
+    nginx: true             # nginx.org
+    openshift: true         # observability.openshift.io
+    opentelemetry: true     # opentelemetry.io
+    prometheus: true        # monitoring.coreos.com
+    reflector: true         # reflector.v1.k8s.emberstack.com
+    reloader: true          # reloader.stakater.com
+    sealedSecrets: true     # sealed-secrets.bitnami.com
+    strimzi: true           # strimzi.io, kafka.strimzi.io
+    tekton: true            # tekton.dev
+    traefik: true           # traefik.io, traefik.containo.us
+    trivy: true             # aquasecurity.github.io
+    velero: true            # velero.io
+
+  # Additional CRD API groups for custom/unlisted CRDs
+  # Example: ["mycompany.io", "custom.example.com"]
+  additionalCrdGroups: []
+
+podAnnotations: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 65532
+  capabilities:
+    drop:
+      - ALL
+
+service:
+  type: ClusterIP
+  port: 9280
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+    # kubernetes.io/ingress.class: nginx
+    # kubernetes.io/tls-acme: "true"
+  hosts:
+    - host: radar.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+  #  - secretName: radar-tls
+  #    hosts:
+  #      - radar.example.com
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+# Timeline storage configuration
+timeline:
+  # Storage backend: "memory" or "sqlite"
+  storage: memory
+  # Path to SQLite database (only used when storage is "sqlite")
+  # Note: Requires a PVC when using sqlite
+  dbPath: /data/timeline.db
+  # Maximum number of events to retain
+  historyLimit: 10000
+
+# Authentication and RBAC configuration
+auth:
+  # Authentication mode: "none" (default), "proxy", or "oidc"
+  mode: none
+  # HMAC secret for session cookies (auto-generated if empty)
+  secret: ""
+  # Use an existing secret for the auth HMAC key
+  existingSecret: ""
+  existingSecretKey: "auth-secret"
+  # Session cookie TTL (sliding — extends on activity, idle sessions expire after this duration)
+  cookieTTL: "4h"
+  # Proxy mode settings
+  proxy:
+    userHeader: "X-Forwarded-User"
+    groupsHeader: "X-Forwarded-Groups"
+  # OIDC mode settings
+  oidc:
+    issuerURL: ""
+    clientID: ""
+    clientSecret: ""
+    # Use an existing K8s Secret for the OIDC client secret (avoids storing in Helm values).
+    # The Secret must contain a key matching clientSecretKey below.
+    existingSecret: ""
+    # Key within the existingSecret that holds the client secret value
+    clientSecretKey: "client-secret"
+    redirectURL: ""
+    groupsClaim: "groups"
+    # URL to redirect after OIDC provider logout (must be registered with IdP)
+    postLogoutRedirectURL: ""
+    # Prefix for OIDC username/groups to match kube-apiserver --oidc-username-prefix / --oidc-groups-prefix
+    usernamePrefix: ""
+    groupsPrefix: ""
+    # Path to CA certificate file for OIDC provider TLS (e.g., /etc/radar/oidc-ca.crt)
+    caCert: ""
+    # Skip TLS verification for OIDC provider (insecure, dev/test only)
+    insecureSkipVerify: false
+    # Enable OIDC Back-Channel Logout endpoint. When enabled, the IdP can POST
+    # a signed logout_token to /auth/backchannel-logout to revoke sessions.
+    # Single-replica only — revocations are stored in memory and lost on pod restart.
+    backchannelLogout: false
+
+# Radar Cloud (hosted SaaS at radarhq.io) — outbound-only tunnel. When
+# enabled, this Radar instance dials out to the Cloud service over
+# WebSocket and serves its existing API through yamux streams. No inbound
+# ports required beyond the Pod's. Leave disabled for standalone OSS
+# deployments.
+cloud:
+  enabled: false
+  # Cloud WebSocket URL. Must start with ws:// or wss://. Example:
+  # wss://api.radarhq.io/agent
+  url: ""
+  # Human-readable cluster identifier from the Cloud install wizard.
+  clusterName: ""
+  # Cluster bearer token (rhc_<random>) issued by the Cloud service. Inline
+  # for convenience in dev; production should use existingSecret instead.
+  token: ""
+  # Source the token from an existing Secret instead of inlining it above.
+  # The Secret must contain a key matching existingSecretKey.
+  existingSecret: ""
+  existingSecretKey: "token"
+  # Default ClusterRoleBindings for Radar Cloud identity groups.
+  #
+  # How it works: Cloud injects X-Forwarded-Groups: cloud:<role>,
+  # cloud:org:<id>, cloud:user:<id> on every proxied request. Radar
+  # impersonates that identity against the K8s API on EVERY user-initiated
+  # call (REST, MCP, Helm reads and writes, workload logs, node ops, pod
+  # file browse, CAPI kubeconfig), so K8s RBAC enforces the tier — no
+  # Radar-side "permission" checks.
+  #
+  # Defaults map Cloud's tiers onto standard K8s ClusterRoles. These are
+  # ClusterRoleBindings (not namespace-scoped RoleBindings), so the grant
+  # applies in EVERY namespace:
+  #   cloud:owner   → "admin"  (full read+write in every namespace, including
+  #                            RBAC within namespaces; no writes on cluster-
+  #                            scoped resources like Nodes, CRDs, ClusterRoles)
+  #   cloud:member  → "edit"   (read+write on standard resources, no RBAC)
+  #   cloud:viewer  → "view"   (read-only)
+  #
+  # These are starting-point grants, not "fallbacks that kick in when the
+  # user has nothing else" — K8s RBAC is strictly ADDITIVE. Operator bindings
+  # stack on top of ours, they can't override or deny. To tighten a tier,
+  # set its boolean below to false (suppresses our binding) and author your
+  # own. To give an individual user extra access, bind cloud:user:<id> to
+  # an extra Role/ClusterRole — it will union with their tier's permissions.
+  # To loosen owner, set ownerClusterRole=cluster-admin.
+  defaultRbac:
+    create: true
+    owner: true
+    member: true
+    viewer: true
+    # ClusterRoles the three Cloud roles bind to. Swap for custom ClusterRoles
+    # to tighten or loosen the defaults.
+    ownerClusterRole: admin
+    memberClusterRole: edit
+    viewerClusterRole: view
+
+# MCP (Model Context Protocol) server for AI tools
+mcp:
+  # Set to false to disable the MCP server (useful when deployed behind authentication)
+  enabled: true
+
+# Traffic source configuration
+traffic:
+  # Manual Prometheus/VictoriaMetrics URL (bypasses auto-discovery)
+  # Use this when auto-discovery doesn't find your metrics service.
+  # Examples:
+  #   http://prometheus-server.monitoring:80
+  #   http://vmsingle.victoria-metrics:8428
+  #   http://vmselect.victoria-metrics:8481/select/0/prometheus
+  prometheusUrl: ""
+
+# Persistence for SQLite timeline storage
+# Required when timeline.storage is "sqlite" (readOnlyRootFilesystem prevents local writes)
+persistence:
+  enabled: false
+  # storageClassName: ""
+  accessMode: ReadWriteOnce
+  size: 1Gi
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+# Additional environment variables
+env: []
+#  - name: DEBUG
+#    value: "true"
+
+# Liveness and readiness probes
+probes:
+  liveness:
+    enabled: true
+    initialDelaySeconds: 10
+    periodSeconds: 30
+    timeoutSeconds: 5
+    failureThreshold: 3
+  readiness:
+    enabled: true
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3

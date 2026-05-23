@@ -1,0 +1,17 @@
+{{- if .Values.rbac.selfUpgrade -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "radar.fullname" . }}-self-upgrade
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "radar.labels" . | nindent 4 }}
+rules:
+  # Allows Radar Cloud to patch this Deployment's image via the yamux tunnel,
+  # enabling one-click upgrades from the Radar Cloud UI. Scoped to this
+  # Deployment only — no other resources or namespaces are affected.
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: ["{{ include "radar.fullname" . }}"]
+    verbs: ["get", "patch"]
+{{- end }}

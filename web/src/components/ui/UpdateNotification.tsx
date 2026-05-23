@@ -1,0 +1,299 @@
+import { useState, useEffect } from 'react'
+import { Download, X, Copy, Check, RotateCw, ArrowDownToLine, Loader2 } from 'lucide-react'
+import { useQueryClient } from '@tanstack/react-query'
+import {
+  useVersionCheck,
+  useStartDesktopUpdate,
+  useDesktopUpdateStatus,
+  useApplyDesktopUpdate,
+} from '../../api/client'
+import type { DesktopUpdateState } from '../../api/client'
+
+const DISMISSED_KEY = 'radar-update-dismissed'
+
+export function UpdateNotification() {
+  const queryClient = useQueryClient()
+  const { data: versionInfo } = useVersionCheck()
+  const [dismissed, setDismissed] = useState(false)
+  const [copied, setCopied] = useState(false)
+  const [copyFailed, setCopyFailed] = useState(false)
+
+  // Desktop update state
+  const [desktopUpdating, setDesktopUpdating] = useState(false)
+  const startUpdate = useStartDesktopUpdate()
+  const applyUpdate = useApplyDesktopUpdate()
+  const { data: updateStatus } = useDesktopUpdateStatus(desktopUpdating)
+
+  const isDesktop = versionInfo?.installMethod === 'desktop'
+
+  // Listen for "Check for Updates" menu item in desktop app (Wails runtime event).
+  // Un-dismisses the notification and invalidates the version check cache.
+  useEffect(() => {
+    const wailsRuntime = (window as unknown as Record<string, unknown>).runtime as
+      | { EventsOn?: (event: string, callback: () => void) => () => void }
+      | undefined
+    if (!wailsRuntime?.EventsOn) return
+
+    const cleanup = wailsRuntime.EventsOn('check-for-updates', () => {
+      setDismissed(false)
+      try { localStorage.removeItem(DISMISSED_KEY) } catch { /* ignore */ }
+      queryClient.invalidateQueries({ queryKey: ['version-check'] })
+    })
+
+    return cleanup
+  }, [queryClient])
+
+  // Log version check errors for debugging
+  useEffect(() => {
+    if (versionInfo?.error) {
+      console.debug('[radar] Version check failed:', versionInfo.error)
+    }
+  }, [versionInfo?.error])
+
+  // Check if this version was already dismissed
+  useEffect(() => {
+    if (versionInfo?.latestVersion) {
+      try {
+        const dismissedVersion = localStorage.getItem(DISMISSED_KEY)
+        if (dismissedVersion === versionInfo.latestVersion) {
+          setDismissed(true)
+        }
+      } catch {
+        // localStorage unavailable (e.g. Safari private mode)
+      }
+    }
+  }, [versionInfo?.latestVersion])
+
+  // Stop polling when update reaches a terminal state
+  useEffect(() => {
+    if (updateStatus?.state === 'error' || updateStatus?.state === 'idle') {
+      setDesktopUpdating(false)
+    }
+  }, [updateStatus?.state])
+
+  const handleDismiss = () => {
+    try {
+      if (versionInfo?.latestVersion) {
+        localStorage.setItem(DISMISSED_KEY, versionInfo.latestVersion)
+      }
+    } catch {
+      // localStorage unavailable — dismiss in-memory only
+    }
+    setDismissed(true)
+  }
+
+  const handleCopyCommand = async () => {
+    if (versionInfo?.updateCommand) {
+      try {
+        await navigator.clipboard.writeText(versionInfo.updateCommand)
+        setCopied(true)
+        setTimeout(() => setCopied(false), 2000)
+      } catch (err) {
+        console.debug('[radar] Clipboard write failed:', err)
+        setCopyFailed(true)
+        setTimeout(() => setCopyFailed(false), 2000)
+      }
+    }
+  }
+
+  const handleStartDesktopUpdate = () => {
+    startUpdate.mutate(undefined, {
+      onSuccess: () => setDesktopUpdating(true),
+    })
+  }
+
+  // Don't show if no update available, dismissed, or error
+  if (!versionInfo?.updateAvailable || dismissed) {
+    return null
+  }
+
+  // Determine what the current effective state is
+  const effectiveState: DesktopUpdateState = updateStatus?.state ?? 'idle'
+
+  return (
+    <div className="fixed bottom-4 right-4 z-50 max-w-sm bg-theme-surface border border-accent/50 rounded-lg shadow-xl p-4 animate-in slide-in-from-right">
+      <div className="flex items-start gap-3">
+        <div className="flex items-center justify-center w-8 h-8 bg-accent-muted rounded-full shrink-0">
+          <UpdateIcon state={effectiveState} />
+        </div>
+        <div className="flex-1 min-w-0">
+          <h4 className="text-sm font-medium text-theme-text-primary">
+            <UpdateTitle state={effectiveState} />
+          </h4>
+          <p className="text-xs text-theme-text-secondary mt-1">
+            Radar {versionInfo.latestVersion} is available.{' '}
+            You're on {versionInfo.currentVersion}.
+          </p>
+
+          {/* Desktop: in-app update flow */}
+          {isDesktop && (
+            <DesktopUpdateControls
+              state={effectiveState}
+              progress={updateStatus?.progress}
+              error={updateStatus?.error}
+              starting={startUpdate.isPending}
+              onStart={handleStartDesktopUpdate}
+              onApply={() => applyUpdate.mutate()}
+              onRetry={handleStartDesktopUpdate}
+            />
+          )}
+
+          {/* CLI: show update command with copy button for package managers */}
+          {!isDesktop && versionInfo.updateCommand ? (
+            <button
+              onClick={handleCopyCommand}
+              className="flex items-center gap-2 mt-2 px-2 py-1.5 bg-theme-elevated rounded text-xs font-mono text-theme-text-primary hover:bg-theme-surface-hover transition-colors w-full"
+            >
+              <code className="flex-1 text-left truncate">{versionInfo.updateCommand}</code>
+              <CopyIcon copied={copied} failed={copyFailed} />
+            </button>
+          ) : (
+            /* Direct download - show release link */
+            !isDesktop && versionInfo.releaseUrl && (
+              <a
+                href={versionInfo.releaseUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 mt-2 text-xs font-medium text-accent-text hover:underline"
+              >
+                Download from GitHub →
+              </a>
+            )
+          )}
+        </div>
+        {/* Don't show dismiss during active update */}
+        {effectiveState !== 'downloading' && effectiveState !== 'applying' && (
+          <button
+            onClick={handleDismiss}
+            className="p-1 text-theme-text-secondary hover:text-theme-text-primary hover:bg-theme-elevated rounded shrink-0"
+            aria-label="Dismiss"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function CopyIcon({ copied, failed }: { copied: boolean; failed: boolean }) {
+  if (copied) return <Check className="w-3.5 h-3.5 text-green-400 shrink-0" />
+  if (failed) return <X className="w-3.5 h-3.5 text-red-400 shrink-0" />
+  return <Copy className="w-3.5 h-3.5 text-theme-text-tertiary shrink-0" />
+}
+
+function UpdateIcon({ state }: { state: DesktopUpdateState }) {
+  switch (state) {
+    case 'downloading':
+    case 'applying':
+      return <Loader2 className="w-4 h-4 text-accent animate-spin" />
+    case 'ready':
+      return <ArrowDownToLine className="w-4 h-4 text-green-400" />
+    default:
+      return <Download className="w-4 h-4 text-accent" />
+  }
+}
+
+function UpdateTitle({ state }: { state: DesktopUpdateState }) {
+  switch (state) {
+    case 'ready':
+      return <>Update Ready</>
+    case 'applying':
+      return <>Applying Update...</>
+    default:
+      return <>Update Available</>
+  }
+}
+
+// DesktopUpdateControls renders the update action area for desktop installs.
+function DesktopUpdateControls({
+  state,
+  progress,
+  error,
+  starting,
+  onStart,
+  onApply,
+  onRetry,
+}: {
+  state: DesktopUpdateState
+  progress?: number
+  error?: string
+  starting?: boolean
+  onStart: () => void
+  onApply: () => void
+  onRetry: () => void
+}) {
+  switch (state) {
+    case 'idle':
+      return (
+        <button
+          onClick={onStart}
+          disabled={starting}
+          className="mt-2 px-3 py-1.5 btn-brand text-xs font-medium rounded"
+        >
+          {starting ? (
+            <span className="inline-flex items-center gap-1.5">
+              <Loader2 className="w-3 h-3 animate-spin" />
+              Starting...
+            </span>
+          ) : (
+            'Update Now'
+          )}
+        </button>
+      )
+
+    case 'downloading':
+      return (
+        <div className="mt-2 space-y-1">
+          <div className="w-full bg-theme-elevated rounded-full h-1.5 overflow-hidden">
+            <div
+              className="bg-accent h-full rounded-full transition-all duration-300"
+              style={{ width: `${Math.round((progress ?? 0) * 100)}%` }}
+            />
+          </div>
+          <p className="text-xs text-theme-text-tertiary">
+            Downloading... {Math.round((progress ?? 0) * 100)}%
+          </p>
+        </div>
+      )
+
+    case 'ready':
+      return (
+        <div className="mt-2 flex gap-2">
+          <button
+            onClick={onApply}
+            className="px-3 py-1.5 bg-green-600 hover:bg-green-500 text-white text-xs font-medium rounded transition-colors"
+          >
+            Restart Now
+          </button>
+        </div>
+      )
+
+    case 'applying':
+      return (
+        <div className="mt-2 flex items-center gap-2">
+          <Loader2 className="w-3.5 h-3.5 text-accent animate-spin" />
+          <p className="text-xs text-theme-text-secondary">Applying update...</p>
+        </div>
+      )
+
+    case 'error':
+      return (
+        <div className="mt-2 space-y-1.5">
+          {!starting && <p className="text-xs text-red-400">{error || 'Update failed'}</p>}
+          <button
+            onClick={onRetry}
+            disabled={starting}
+            className="inline-flex items-center gap-1 px-3 py-1.5 bg-theme-elevated hover:bg-theme-surface-hover text-xs font-medium text-theme-text-primary rounded transition-colors disabled:opacity-50"
+          >
+            {starting ? (
+              <Loader2 className="w-3 h-3 animate-spin" />
+            ) : (
+              <RotateCw className="w-3 h-3" />
+            )}
+            {starting ? 'Starting...' : 'Retry'}
+          </button>
+        </div>
+      )
+  }
+}
