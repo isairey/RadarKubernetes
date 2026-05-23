@@ -340,13 +340,13 @@ Sin consumir enormes cantidades de contexto en los LLMs.
 ## Clonar proyecto
 
 ```bash
-git clone https://github.com/skyhook-io/radar.git
+git clone https://github.com/isairey/RadarKubernetes.git
 ```
 
 ## Entrar al proyecto
 
 ```bash
-cd radar
+cd RadarKubernetes
 ```
 
 ## Instalar dependencias
@@ -378,17 +378,9 @@ make watch-backend
 
 ---
 
-# 🌎 Sitio Oficial
 
-🔗 https://radarhq.io
 
----
 
-# 📚 Documentación
-
-📖 https://radarhq.io/docs
-
----
 
 # 🧠 Casos de Uso
 
